@@ -1,0 +1,59 @@
+{
+  "name": "@flametrench/ids",
+  "version": "0.1.0",
+  "description": "Prefixed wire-format IDs for Flametrench. UUIDv7 storage, self-describing public identifiers.",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "NDC Digital, LLC",
+    "url": "https://flametrench.dev"
+  },
+  "homepage": "https://github.com/flametrench/node",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flametrench/node.git",
+    "directory": "packages/ids"
+  },
+  "bugs": {
+    "url": "https://github.com/flametrench/node/issues"
+  },
+  "keywords": [
+    "flametrench",
+    "uuid",
+    "uuidv7",
+    "identifier",
+    "id"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  }
+}
