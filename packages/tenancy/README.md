@@ -84,6 +84,29 @@ interface TenancyStore {
 }
 ```
 
+## Using the Postgres-backed store
+
+The Postgres implementation lives at a separate entry point so the base package stays Postgres-free. Install `pg` (peer dependency) alongside this package and import from `@flametrench/tenancy/postgres`:
+
+```ts
+import { Pool } from "pg";
+import { PostgresTenancyStore } from "@flametrench/tenancy/postgres";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const store = new PostgresTenancyStore(pool);
+```
+
+The reference schema (`spec/reference/postgres.sql` in `flametrench/spec`, also vendored at `packages/tenancy/test/postgres-schema.sql` in this repo for tests) must be applied to the target database before use. The schema pre-dates this package; applying it via your migration tool of choice is the recommended path.
+
+Every operation that modifies more than one row runs inside a single `BEGIN`/`COMMIT` transaction, so the spec's atomicity guarantees are real database transactions:
+
+- `createOrg`: inserts `org`, `mem`, and `tup` in one transaction.
+- `changeRole`: revokes the old `mem`, inserts the new `mem` with `replaces`, deletes the old `tup`, inserts the new `tup` — in one transaction.
+- `acceptInvitation`: inserts `mem`, materializes the membership `tup`, expands all `pre_tuples` into `tup` rows, transitions the invitation — one transaction.
+- `transferOwnership`: demotes the old owner's `mem`, promotes the target's `mem`, swaps both corresponding `tup` rows — one transaction.
+
+The Postgres store has no dependency on the identity layer, but its FK constraints require rows to exist in the `usr` table. Integration tests register test users explicitly; production deployments get this for free once `@flametrench/identity` lands.
+
 ## Spec conformance
 
 This package implements the tenancy layer of Flametrench v0.1. See the normative specification at [`spec/docs/tenancy.md`](https://github.com/flametrench/spec/blob/main/docs/tenancy.md) and the design decisions at [ADR 0002](https://github.com/flametrench/spec/blob/main/decisions/0002-tenancy-model.md) and [ADR 0003](https://github.com/flametrench/spec/blob/main/decisions/0003-invitation-state-machine.md).

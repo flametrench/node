@@ -17,6 +17,25 @@ jobs:
 
     name: Node ${{ matrix.node }}
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: flametrench_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Enables PostgresTenancyStore integration tests. Unset → those
+      # tests skip gracefully.
+      TENANCY_POSTGRES_URL: postgresql://postgres:test@localhost:5432/flametrench_test
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,14 +82,26 @@ jobs:
           ref: main
           path: spec
 
-      - name: Verify vendored fixtures are byte-identical to upstream
+      - name: Verify vendored ID fixtures are byte-identical to upstream
         run: |
           set -euo pipefail
           SDK_FIXTURES=sdk/packages/ids/test/conformance/fixtures/ids
           SPEC_FIXTURES=spec/conformance/fixtures/ids
           if ! diff -r "$SDK_FIXTURES" "$SPEC_FIXTURES"; then
-            echo "::error::Vendored conformance fixtures have drifted from flametrench/spec."
+            echo "::error::Vendored ID fixtures have drifted from flametrench/spec."
             echo "To resolve: copy spec/conformance/fixtures/ids/*.json into packages/ids/test/conformance/fixtures/ids/ and commit."
             exit 1
           fi
           echo "✅ All vendored ID fixtures match upstream."
+
+      - name: Verify vendored Postgres schema is byte-identical to upstream
+        run: |
+          set -euo pipefail
+          SDK_SCHEMA=sdk/packages/tenancy/test/postgres-schema.sql
+          SPEC_SCHEMA=spec/reference/postgres.sql
+          if ! diff -q "$SDK_SCHEMA" "$SPEC_SCHEMA"; then
+            echo "::error::Vendored Postgres schema has drifted from flametrench/spec/reference/postgres.sql."
+            echo "To resolve: cp spec/reference/postgres.sql packages/tenancy/test/postgres-schema.sql && commit."
+            exit 1
+          fi
+          echo "✅ Vendored Postgres schema matches upstream."
