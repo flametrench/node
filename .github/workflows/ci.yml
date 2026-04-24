@@ -43,3 +43,32 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  conformance-drift:
+    name: Conformance fixtures match upstream spec
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this monorepo
+        uses: actions/checkout@v4
+        with:
+          path: sdk
+
+      - name: Checkout flametrench/spec
+        uses: actions/checkout@v4
+        with:
+          repository: flametrench/spec
+          ref: main
+          path: spec
+
+      - name: Verify vendored fixtures are byte-identical to upstream
+        run: |
+          set -euo pipefail
+          SDK_FIXTURES=sdk/packages/ids/test/conformance/fixtures/ids
+          SPEC_FIXTURES=spec/conformance/fixtures/ids
+          if ! diff -r "$SDK_FIXTURES" "$SPEC_FIXTURES"; then
+            echo "::error::Vendored conformance fixtures have drifted from flametrench/spec."
+            echo "To resolve: copy spec/conformance/fixtures/ids/*.json into packages/ids/test/conformance/fixtures/ids/ and commit."
+            exit 1
+          fi
+          echo "✅ All vendored ID fixtures match upstream."
