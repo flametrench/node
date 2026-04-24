@@ -8,8 +8,9 @@ Node SDK for [Flametrench](https://github.com/flametrench/spec). Monorepo of `@f
 - [`@flametrench/tenancy`](./packages/tenancy) — Organizations, memberships, and invitations. In-memory + Postgres-backed stores (via `@flametrench/tenancy/postgres`).
 - [`@flametrench/authz`](./packages/authz) — Relational tuples and exact-match `check()`. No rewrite rules in v0.1 per the spec.
 - [`@flametrench/identity`](./packages/identity) — Users, credentials (Argon2id-pinned password + passkey + OIDC), and user-bound sessions with rotation on refresh.
+- [`@flametrench/nextjs`](./packages/nextjs) — Next.js 15 App Router adapter: cookie-backed session helpers, password sign-in, route handlers for `/api/auth/*`.
 
-More packages will land as the v0.1 specification stabilizes (Postgres stores for authz + identity, framework adapters).
+More packages will land as the v0.1 specification stabilizes (Postgres stores for authz + identity, more framework adapters).
 
 ## Development
 
