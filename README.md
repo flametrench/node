@@ -5,10 +5,11 @@ Node SDK for [Flametrench](https://github.com/flametrench/spec). Monorepo of `@f
 ## Packages
 
 - [`@flametrench/ids`](./packages/ids) — Prefixed wire-format IDs for Flametrench. Stable.
-- [`@flametrench/tenancy`](./packages/tenancy) — Organizations, memberships, and invitations. Includes an in-memory reference store; a Postgres-backed store is planned.
+- [`@flametrench/tenancy`](./packages/tenancy) — Organizations, memberships, and invitations. In-memory + Postgres-backed stores (via `@flametrench/tenancy/postgres`).
 - [`@flametrench/authz`](./packages/authz) — Relational tuples and exact-match `check()`. No rewrite rules in v0.1 per the spec.
+- [`@flametrench/identity`](./packages/identity) — Users, credentials (Argon2id-pinned password + passkey + OIDC), and user-bound sessions with rotation on refresh.
 
-More packages will land as the v0.1 specification stabilizes (identity, framework adapters).
+More packages will land as the v0.1 specification stabilizes (Postgres stores for authz + identity, framework adapters).
 
 ## Development
 
