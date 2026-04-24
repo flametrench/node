@@ -42,13 +42,13 @@
     "node": ">=20"
   },
   "dependencies": {
-    "uuid": "^11.0.0"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "tsup": "^8.0.0",
+    "tsup": "^8.5.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vitest": "^3.0.0"
   },
   "scripts": {
     "build": "tsup",
