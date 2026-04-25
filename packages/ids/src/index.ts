@@ -107,6 +107,54 @@ export function decode(id: string): DecodedId {
 }
 
 /**
+ * Decode a Flametrench wire-format ID without checking the registered-type set.
+ *
+ * Use this for backend storage adapters that need to convert wire-format
+ * object IDs to canonical UUIDs without knowing the application's
+ * domain types in advance — e.g., when an authz tuple has
+ * `objectType: "proj"` and `objectId: "proj_0190f2a8..."`.
+ *
+ * Validates wire-format shape (separator, 32-char lowercase hex, version
+ * nibble 1–8). Does NOT consult `TYPES`. See spec/docs/ids.md.
+ *
+ * @throws {InvalidIdError} If the ID's structure is malformed. Never
+ *                          throws `InvalidTypeError`.
+ */
+export function decodeAny(id: string): { type: string; uuid: string } {
+  const separator = id.indexOf("_");
+  if (separator === -1) {
+    throw new InvalidIdError(`ID missing type separator: ${id}`);
+  }
+
+  const type = id.slice(0, separator);
+  const hex = id.slice(separator + 1);
+
+  if (type.length === 0) {
+    throw new InvalidIdError(`ID has empty type prefix: ${id}`);
+  }
+
+  if (hex.length !== HEX_PAYLOAD_LENGTH || !HEX_PATTERN.test(hex)) {
+    throw new InvalidIdError(
+      `ID payload is not 32 lowercase hex characters: ${id}`,
+    );
+  }
+
+  if (!VERSION_NIBBLE_PATTERN.test(hex[12]!)) {
+    throw new InvalidIdError(`ID payload is not a valid UUID: ${id}`);
+  }
+
+  const canonical = [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+
+  return { type, uuid: canonical };
+}
+
+/**
  * Check whether a string is a valid Flametrench wire-format ID.
  *
  * Optionally asserts that the ID is of a specific type.
@@ -163,6 +211,25 @@ export function generate(type: IdType): string {
  */
 export function isId(value: unknown, expectedType?: IdType): value is string {
   return typeof value === "string" && isValid(value, expectedType);
+}
+
+/**
+ * Predicate counterpart to {@link decodeAny}. Returns true for any
+ * well-formed wire-format ID regardless of registry membership.
+ *
+ * Use this when validating input from external systems that may
+ * legitimately reference application-defined object types.
+ */
+export function isValidShape(id: string): boolean {
+  try {
+    decodeAny(id);
+    return true;
+  } catch (error) {
+    if (error instanceof InvalidIdError) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function assertType(type: string): asserts type is IdType {
