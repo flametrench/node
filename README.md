@@ -9,6 +9,7 @@ Node SDK for [Flametrench](https://github.com/flametrench/spec). Monorepo of `@f
 - [`@flametrench/authz`](./packages/authz) — Relational tuples and exact-match `check()`. No rewrite rules in v0.1 per the spec.
 - [`@flametrench/identity`](./packages/identity) — Users, credentials (Argon2id-pinned password + passkey + OIDC), and user-bound sessions with rotation on refresh.
 - [`@flametrench/nextjs`](./packages/nextjs) — Next.js 15 App Router adapter: cookie-backed session helpers, password sign-in, route handlers for `/api/auth/*`.
+- [`@flametrench/server`](./packages/server) — Fastify 5 reference HTTP server exposing the v0.1 OpenAPI surface, backed by pluggable stores. Drop-in deployable starting point.
 
 More packages will land as the v0.1 specification stabilizes (Postgres stores for authz + identity, more framework adapters).
 
