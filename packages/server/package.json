@@ -1,0 +1,62 @@
+{
+  "name": "@flametrench/server",
+  "version": "0.0.1",
+  "description": "Reference HTTP server for Flametrench: Fastify 5 app exposing the v0.1 OpenAPI surface, backed by pluggable stores. Bring your own identity/tenancy/authz store; the server wires everything else.",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "NDC Digital, LLC",
+    "url": "https://flametrench.dev"
+  },
+  "homepage": "https://github.com/flametrench/node",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flametrench/node.git",
+    "directory": "packages/server"
+  },
+  "bugs": {
+    "url": "https://github.com/flametrench/node/issues"
+  },
+  "keywords": [
+    "flametrench",
+    "server",
+    "fastify",
+    "openapi",
+    "reference-implementation"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@flametrench/authz": "workspace:*",
+    "@flametrench/identity": "workspace:*",
+    "@flametrench/tenancy": "workspace:*",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  }
+}
