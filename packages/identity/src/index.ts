@@ -45,6 +45,8 @@ export {
   type InMemoryIdentityStoreOptions,
 } from "./in-memory.js";
 
+export { hashPassword, verifyPasswordHash } from "./hashing.js";
+
 export {
   AlreadyTerminalError,
   CredentialNotActiveError,
