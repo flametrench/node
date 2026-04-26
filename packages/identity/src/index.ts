@@ -85,3 +85,24 @@ export {
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
+
+// v0.2 — WebAuthn assertion verification (Proposed; ADR 0008)
+export {
+  WebAuthnChallengeMismatchError,
+  WebAuthnCounterRegressionError,
+  WebAuthnError,
+  WebAuthnMalformedError,
+  WebAuthnOriginMismatchError,
+  WebAuthnRpIdMismatchError,
+  WebAuthnSignatureError,
+  WebAuthnTypeMismatchError,
+  WebAuthnUnsupportedKeyError,
+  WebAuthnUserNotPresentError,
+  WebAuthnUserNotVerifiedError,
+  b64urlEncode,
+  coseKeyEs256,
+  webauthnVerifyAssertion,
+  type VerifyAssertionInput,
+  type WebAuthnAssertionResult,
+  type WebAuthnFailureReason,
+} from "./webauthn.js";

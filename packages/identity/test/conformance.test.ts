@@ -25,6 +25,8 @@ import {
   isValidRecoveryCode,
   totpCompute,
   verifyPasswordHash,
+  WebAuthnError,
+  webauthnVerifyAssertion,
 } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +49,7 @@ interface FixtureFile {
   conformance_level: "MUST" | "SHOULD" | "MAY";
   description: string;
   tests: FixtureTest[];
+  shared?: Record<string, unknown>;
 }
 
 function loadFixture(relativePath: string): FixtureFile {
@@ -116,6 +119,70 @@ function loadFixture(relativePath: string): FixtureFile {
         it(`[${t.id}] ${t.description}`, () => {
           const input = t.input as { code: string };
           expect(isValidRecoveryCode(input.code)).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.2: identity.webauthn_verify_assertion ───
+
+interface WebAuthnFixtureInput {
+  cose_public_key_hex?: string;
+  stored_sign_count?: number;
+  stored_rp_id?: string;
+  expected_challenge_hex?: string;
+  expected_origin?: string;
+  authenticator_data_hex?: string;
+  client_data_json_hex?: string;
+  signature_hex?: string;
+  require_user_verified?: boolean;
+  require_user_present?: boolean;
+}
+
+function runWebauthn(
+  shared: WebAuthnFixtureInput,
+  test: FixtureTest,
+): { ok: boolean; new_sign_count?: number; reason?: string } {
+  const inp: WebAuthnFixtureInput = {
+    ...shared,
+    ...(test.input as WebAuthnFixtureInput),
+  };
+  try {
+    const result = webauthnVerifyAssertion({
+      cosePublicKey: Buffer.from(inp.cose_public_key_hex!, "hex"),
+      storedSignCount: inp.stored_sign_count!,
+      storedRpId: inp.stored_rp_id!,
+      expectedChallenge: Buffer.from(inp.expected_challenge_hex!, "hex"),
+      expectedOrigin: inp.expected_origin!,
+      authenticatorData: Buffer.from(inp.authenticator_data_hex!, "hex"),
+      clientDataJson: Buffer.from(inp.client_data_json_hex!, "hex"),
+      signature: Buffer.from(inp.signature_hex!, "hex"),
+      requireUserVerified: inp.require_user_verified ?? true,
+      requireUserPresent: inp.require_user_present ?? true,
+    });
+    return { ok: true, new_sign_count: result.newSignCount };
+  } catch (err) {
+    if (err instanceof WebAuthnError) {
+      return { ok: false, reason: err.reason };
+    }
+    throw err;
+  }
+}
+
+for (const path of [
+  "identity/mfa/webauthn-assertion.json",
+  "identity/mfa/webauthn-counter-decrease-rejected.json",
+]) {
+  const fixture = loadFixture(path);
+  const shared = (fixture.shared ?? {}) as WebAuthnFixtureInput;
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · ${path.split("/").pop()}`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const actual = runWebauthn(shared, t);
+          expect(actual).toEqual(t.expected.result);
         });
       }
     },
