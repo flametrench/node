@@ -14,6 +14,7 @@
 import {
   createHash,
   createPublicKey,
+  timingSafeEqual,
   verify as cryptoVerify,
 } from "node:crypto";
 
@@ -325,11 +326,17 @@ function b64urlDecode(s: string): Uint8Array {
   return new Uint8Array(Buffer.from(s, "base64url"));
 }
 
+/**
+ * Constant-time byte-string compare. Wraps node:crypto.timingSafeEqual
+ * with the WebAuthn-specific length-mismatch handling: WebAuthn allows
+ * the verifier to short-circuit on length mismatch (the underlying
+ * primitive throws when lengths differ), and length is not itself a
+ * secret in any of the use sites here (RP-ID hash is always 32 bytes,
+ * challenge length is application-chosen and known to the attacker).
+ */
 function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
-  return diff === 0;
+  return timingSafeEqual(a, b);
 }
 
 /**
