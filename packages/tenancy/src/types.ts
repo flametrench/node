@@ -56,6 +56,30 @@ export interface Organization {
   status: Status;
   createdAt: Date;
   updatedAt: Date;
+  /** v0.2 (ADR 0011) — optional display name. SHOULD be set when the org has a human-meaningful identity. */
+  name?: string | null;
+  /** v0.2 (ADR 0011) — optional URL handle. Globally unique when set; matches `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. */
+  slug?: string | null;
+}
+
+export interface CreateOrgInput {
+  creator: UsrId;
+  /** v0.2 (ADR 0011) — optional display name. */
+  name?: string | null;
+  /** v0.2 (ADR 0011) — optional URL handle. */
+  slug?: string | null;
+}
+
+/**
+ * Input to {@link TenancyStore.updateOrg}. Per ADR 0011 partial-update
+ * semantics: an OMITTED field means "don't change"; an explicit `null`
+ * means "set to null." Use TypeScript's `undefined` vs `null`
+ * distinction — pass `undefined` (or omit the key) to skip a field.
+ */
+export interface UpdateOrgInput {
+  orgId: OrgId;
+  name?: string | null;
+  slug?: string | null;
 }
 
 export interface Membership {

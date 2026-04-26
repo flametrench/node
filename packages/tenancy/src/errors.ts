@@ -106,6 +106,19 @@ export class PreconditionError extends TenancyError {
 }
 
 /**
+ * The supplied org slug is already in use by another active org.
+ *
+ * Per ADR 0011, slugs are globally unique within a deployment when set.
+ * Revoked orgs free their slug; NULL slugs are not unique-constrained.
+ */
+export class OrgSlugConflictError extends TenancyError {
+  constructor(public readonly slug: string) {
+    super(`Org slug ${JSON.stringify(slug)} is already in use`, "conflict.org_slug");
+    this.name = "OrgSlugConflictError";
+  }
+}
+
+/**
  * `acceptInvitation` was called with `asUsrId` but no `acceptingIdentifier`.
  *
  * Per ADR 0009, the SDK fails closed: callers MUST supply

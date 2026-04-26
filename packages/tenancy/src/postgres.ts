@@ -46,6 +46,7 @@ import {
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
+  OrgSlugConflictError,
   PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
@@ -58,6 +59,7 @@ import type {
   AdminRemoveInput,
   ChangeRoleInput,
   CreateInvitationInput,
+  CreateOrgInput,
   DeclineInvitationInput,
   InvId,
   Invitation,
@@ -75,8 +77,31 @@ import type {
   Status,
   TransferOwnershipInput,
   Tuple,
+  UpdateOrgInput,
   UsrId,
 } from "./types.js";
+
+// ADR 0011: DNS-label-style slug pattern.
+const SLUG_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function validateSlug(slug: string): void {
+  if (!SLUG_PATTERN.test(slug)) {
+    throw new PreconditionError(
+      `Slug ${JSON.stringify(slug)} does not match the spec pattern`,
+      "org_slug_format",
+    );
+  }
+}
+
+/** Postgres SQLSTATE 23505 = unique_violation. Cross-check the constraint name. */
+function isUniqueViolation(err: unknown, constraint: string): boolean {
+  return (
+    typeof err === "object"
+    && err !== null
+    && (err as { code?: string }).code === "23505"
+    && (err as { constraint?: string }).constraint === constraint
+  );
+}
 
 const ADMIN_RANK: Record<string, number> = {
   owner: 4,
@@ -110,6 +135,8 @@ function usrIdOf(uuid: string): UsrId {
 interface OrgRow {
   id: string;
   status: Status;
+  name: string | null;
+  slug: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -156,6 +183,8 @@ function rowToOrg(r: OrgRow): Organization {
   return {
     id: orgIdOf(r.id),
     status: r.status,
+    name: r.name,
+    slug: r.slug,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -275,21 +304,36 @@ export class PostgresTenancyStore implements TenancyStore {
 
   // ─── Organizations ───
 
-  async createOrg(creator: UsrId): Promise<{
+  async createOrg(input: UsrId | CreateOrgInput): Promise<{
     org: Organization;
     ownerMembership: Membership;
   }> {
+    const normalized: CreateOrgInput =
+      typeof input === "string" ? { creator: input } : input;
+    if (normalized.slug !== undefined && normalized.slug !== null) {
+      validateSlug(normalized.slug);
+    }
     const now = this.now();
     const orgUuid = decode(generate("org")).uuid;
     const memUuid = decode(generate("mem")).uuid;
     const tupUuid = decode(generate("tup")).uuid;
-    const creatorUuid = wireToUuid(creator);
+    const creatorUuid = wireToUuid(normalized.creator);
+    const name = normalized.name ?? null;
+    const slug = normalized.slug ?? null;
 
     return this.tx(async (c) => {
-      await c.query(
-        `INSERT INTO org (id, status, created_at, updated_at) VALUES ($1, 'active', $2, $2)`,
-        [orgUuid, now],
-      );
+      try {
+        await c.query(
+          `INSERT INTO org (id, status, name, slug, created_at, updated_at)
+           VALUES ($1, 'active', $2, $3, $4, $4)`,
+          [orgUuid, name, slug, now],
+        );
+      } catch (err) {
+        if (isUniqueViolation(err, "org_slug_unique") && slug !== null) {
+          throw new OrgSlugConflictError(slug);
+        }
+        throw err;
+      }
       await c.query(
         `INSERT INTO mem (id, usr_id, org_id, role, status, replaces, invited_by, removed_by, created_at, updated_at)
          VALUES ($1, $2, $3, 'owner', 'active', NULL, NULL, NULL, $4, $4)`,
@@ -305,10 +349,12 @@ export class PostgresTenancyStore implements TenancyStore {
         status: "active",
         createdAt: now,
         updatedAt: now,
+        name,
+        slug,
       };
       const ownerMembership: Membership = {
         id: memIdOf(memUuid),
-        usrId: creator,
+        usrId: normalized.creator,
         orgId: org.id,
         role: "owner",
         status: "active",
@@ -324,17 +370,54 @@ export class PostgresTenancyStore implements TenancyStore {
 
   async getOrg(orgId: OrgId): Promise<Organization> {
     const { rows } = await this.pool.query<OrgRow>(
-      `SELECT id, status, created_at, updated_at FROM org WHERE id = $1`,
+      `SELECT id, status, name, slug, created_at, updated_at FROM org WHERE id = $1`,
       [wireToUuid(orgId)],
     );
     if (rows.length === 0) throw new NotFoundError(`Organization ${orgId} not found`);
     return rowToOrg(rows[0]!);
   }
 
+  async updateOrg(input: UpdateOrgInput): Promise<Organization> {
+    return this.tx(async (c) => {
+      const { rows } = await c.query<OrgRow>(
+        `SELECT id, status, name, slug, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
+        [wireToUuid(input.orgId)],
+      );
+      if (rows.length === 0) throw new NotFoundError(`Organization ${input.orgId} not found`);
+      const row = rows[0]!;
+      if (row.status === "revoked") {
+        throw new AlreadyTerminalError(`Org ${input.orgId} is revoked; cannot update`);
+      }
+      const newName = "name" in input ? input.name ?? null : row.name;
+      let newSlug = row.slug;
+      if ("slug" in input) {
+        if (input.slug !== null && input.slug !== undefined) {
+          validateSlug(input.slug);
+        }
+        newSlug = input.slug ?? null;
+      }
+      const now = this.now();
+      try {
+        const { rows: updated } = await c.query<OrgRow>(
+          `UPDATE org SET name = $2, slug = $3, updated_at = $4
+           WHERE id = $1
+           RETURNING id, status, name, slug, created_at, updated_at`,
+          [wireToUuid(input.orgId), newName, newSlug, now],
+        );
+        return rowToOrg(updated[0]!);
+      } catch (err) {
+        if (isUniqueViolation(err, "org_slug_unique") && newSlug !== null) {
+          throw new OrgSlugConflictError(newSlug);
+        }
+        throw err;
+      }
+    });
+  }
+
   private async transitionOrg(orgId: OrgId, to: Status): Promise<Organization> {
     return this.tx(async (c) => {
       const { rows } = await c.query<OrgRow>(
-        `SELECT id, status, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, name, slug, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
         [wireToUuid(orgId)],
       );
       if (rows.length === 0) throw new NotFoundError(`Organization ${orgId} not found`);
@@ -362,7 +445,7 @@ export class PostgresTenancyStore implements TenancyStore {
   async reinstateOrg(orgId: OrgId): Promise<Organization> {
     return this.tx(async (c) => {
       const { rows } = await c.query<OrgRow>(
-        `SELECT id, status, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, name, slug, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
         [wireToUuid(orgId)],
       );
       if (rows.length === 0) throw new NotFoundError(`Organization ${orgId} not found`);
@@ -385,7 +468,7 @@ export class PostgresTenancyStore implements TenancyStore {
   async revokeOrg(orgId: OrgId): Promise<Organization> {
     return this.tx(async (c) => {
       const { rows } = await c.query<OrgRow>(
-        `SELECT id, status, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, name, slug, created_at, updated_at FROM org WHERE id = $1 FOR UPDATE`,
         [wireToUuid(orgId)],
       );
       if (rows.length === 0) throw new NotFoundError(`Organization ${orgId} not found`);

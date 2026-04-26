@@ -12,6 +12,7 @@ import {
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
+  OrgSlugConflictError,
   PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
@@ -24,6 +25,7 @@ import type {
   AdminRemoveInput,
   ChangeRoleInput,
   CreateInvitationInput,
+  CreateOrgInput,
   DeclineInvitationInput,
   InvId,
   Invitation,
@@ -40,8 +42,24 @@ import type {
   Status,
   TransferOwnershipInput,
   Tuple,
+  UpdateOrgInput,
   UsrId,
 } from "./types.js";
+
+// ADR 0011: DNS-label-style slug pattern (1-63 lowercase ASCII chars +
+// digits + hyphens, no leading/trailing hyphen).
+const SLUG_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function validateSlug(slug: string): void {
+  if (!SLUG_PATTERN.test(slug)) {
+    throw new PreconditionError(
+      `Slug ${JSON.stringify(slug)} does not match the spec pattern ` +
+        `(DNS-label-style: 1-63 lowercase ASCII chars or digits or hyphens, ` +
+        `no leading/trailing hyphen)`,
+      "org_slug_format",
+    );
+  }
+}
 
 // ─── Admin hierarchy (for adminRemove precondition) ───
 const ADMIN_RANK: Record<string, number> = {
@@ -160,20 +178,30 @@ export class InMemoryTenancyStore implements TenancyStore {
 
   // ─── Organizations ───
 
-  async createOrg(creator: UsrId): Promise<{
+  async createOrg(input: UsrId | CreateOrgInput): Promise<{
     org: Organization;
     ownerMembership: Membership;
   }> {
+    // Backwards-compatible shim: accept either a bare creator UsrId
+    // (v0.1 form) or a {creator, name?, slug?} object (v0.2 form).
+    const normalized: CreateOrgInput =
+      typeof input === "string" ? { creator: input } : input;
+    if (normalized.slug !== undefined && normalized.slug !== null) {
+      validateSlug(normalized.slug);
+      this.enforceSlugUnique(normalized.slug, null);
+    }
     const now = this.now();
     const org: Organization = {
       id: this.newOrgId(),
       status: "active",
       createdAt: now,
       updatedAt: now,
+      name: normalized.name ?? null,
+      slug: normalized.slug ?? null,
     };
     const ownerMembership: Membership = {
       id: this.newMemId(),
-      usrId: creator,
+      usrId: normalized.creator,
       orgId: org.id,
       role: "owner",
       status: "active",
@@ -191,6 +219,39 @@ export class InMemoryTenancyStore implements TenancyStore {
 
   async getOrg(orgId: OrgId): Promise<Organization> {
     return this.requireOrg(orgId);
+  }
+
+  async updateOrg(input: UpdateOrgInput): Promise<Organization> {
+    const org = await this.requireOrg(input.orgId);
+    if (org.status === "revoked") {
+      throw new AlreadyTerminalError(`Org ${input.orgId} is revoked; cannot update`);
+    }
+    const newName = "name" in input ? input.name ?? null : org.name ?? null;
+    let newSlug = org.slug ?? null;
+    if ("slug" in input) {
+      if (input.slug !== null && input.slug !== undefined) {
+        validateSlug(input.slug);
+        this.enforceSlugUnique(input.slug, input.orgId);
+      }
+      newSlug = input.slug ?? null;
+    }
+    const updated: Organization = {
+      ...org,
+      name: newName,
+      slug: newSlug,
+      updatedAt: this.now(),
+    };
+    this.orgs.set(input.orgId, updated);
+    return updated;
+  }
+
+  private enforceSlugUnique(slug: string, excludeOrgId: OrgId | null): void {
+    for (const existing of this.orgs.values()) {
+      if (existing.id === excludeOrgId) continue;
+      if (existing.slug === slug && existing.status !== "revoked") {
+        throw new OrgSlugConflictError(slug);
+      }
+    }
   }
 
   private transitionOrg(orgId: OrgId, to: Status): Organization {

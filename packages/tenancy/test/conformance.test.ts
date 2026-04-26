@@ -42,6 +42,7 @@ import {
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
+  OrgSlugConflictError,
   PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
@@ -68,6 +69,7 @@ const ERROR_CLASSES = {
   NotFoundError,
   IdentifierBindingRequiredError,
   IdentifierMismatchError,
+  OrgSlugConflictError,
 } as const;
 
 interface FixtureFile {
@@ -180,8 +182,34 @@ async function invokeOp(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   switch (op) {
-    case "create_org":
-      return store.createOrg(args.creator as UsrId);
+    case "create_org": {
+      const inp: { creator: UsrId; name?: string | null; slug?: string | null } = {
+        creator: args.creator as UsrId,
+      };
+      if ("name" in args) inp.name = args.name as string | null;
+      if ("slug" in args) inp.slug = args.slug as string | null;
+      return store.createOrg(inp);
+    }
+
+    case "update_org": {
+      const inp: { orgId: OrgId; name?: string | null; slug?: string | null } = {
+        orgId: args.org_id as OrgId,
+      };
+      if ("name" in args) inp.name = args.name as string | null;
+      if ("slug" in args) inp.slug = args.slug as string | null;
+      return store.updateOrg(inp);
+    }
+
+    case "assert_org_fields": {
+      const org = await store.getOrg(args.org_id as OrgId);
+      if ("expected_name" in args) {
+        expect(org.name ?? null).toBe(args.expected_name);
+      }
+      if ("expected_slug" in args) {
+        expect(org.slug ?? null).toBe(args.expected_slug);
+      }
+      return null;
+    }
 
     case "add_member":
       return store.addMember({
@@ -332,6 +360,7 @@ for (const [name, file] of [
   ["tenancy.admin_remove", "tenancy/admin-remove.json"],
   ["tenancy.accept_invitation", "tenancy/invitation-accept.json"],
   ["tenancy.accept_invitation.binding", "tenancy/invitation-accept-binding.json"],
+  ["tenancy.update_org", "tenancy/org-name-slug.json"],
 ] as const) {
   const fixture = loadFixture(file);
   describe(`Conformance · ${name} [${fixture.conformance_level}]`, () => {

@@ -8,6 +8,7 @@ import type {
   AdminRemoveInput,
   ChangeRoleInput,
   CreateInvitationInput,
+  CreateOrgInput,
   DeclineInvitationInput,
   Invitation,
   InvId,
@@ -22,6 +23,7 @@ import type {
   SelfLeaveInput,
   TransferOwnershipInput,
   Tuple,
+  UpdateOrgInput,
   UsrId,
 } from "./types.js";
 
@@ -56,9 +58,22 @@ export interface TenancyStore {
   /**
    * Create an org AND the creator's owner membership in one transaction.
    * Returns both so callers have both IDs without a round-trip.
+   *
+   * Accepts the v0.2 (ADR 0011) optional `name` and `slug` fields. Pass
+   * a {@link CreateOrgInput} object for the v0.2 form, or just a
+   * `UsrId` for the v0.1-compatible form.
    */
-  createOrg(creator: UsrId): Promise<{ org: Organization; ownerMembership: Membership }>;
+  createOrg(
+    input: UsrId | CreateOrgInput,
+  ): Promise<{ org: Organization; ownerMembership: Membership }>;
   getOrg(orgId: OrgId): Promise<Organization>;
+  /**
+   * v0.2 (ADR 0011) — partial update of `name` and/or `slug`. An
+   * OMITTED field means "don't change"; an explicit `null` means
+   * "set to null." Slug uniqueness violations raise OrgSlugConflictError;
+   * updating a revoked org raises AlreadyTerminalError.
+   */
+  updateOrg(input: UpdateOrgInput): Promise<Organization>;
   suspendOrg(orgId: OrgId): Promise<Organization>;
   reinstateOrg(orgId: OrgId): Promise<Organization>;
   revokeOrg(orgId: OrgId): Promise<Organization>;

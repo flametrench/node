@@ -29,6 +29,7 @@ export type {
   AdminRemoveInput,
   ChangeRoleInput,
   CreateInvitationInput,
+  CreateOrgInput,
   DeclineInvitationInput,
   InvId,
   Invitation,
@@ -47,6 +48,7 @@ export type {
   Status,
   TransferOwnershipInput,
   Tuple,
+  UpdateOrgInput,
   UsrId,
 } from "./types.js";
 export { ADMIN_HIERARCHY } from "./types.js";
@@ -67,6 +69,7 @@ export {
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
+  OrgSlugConflictError,
   PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
