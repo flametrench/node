@@ -10,9 +10,12 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  AlreadyTerminalError,
   DuplicateMembershipError,
   InvitationNotPendingError,
   NotFoundError,
+  OrgSlugConflictError,
+  PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
   type UsrId,
@@ -367,6 +370,71 @@ describe.skipIf(!hasPostgres)("PostgresTenancyStore", () => {
     await expect(
       store.getInvitation(generate("inv") as never),
     ).rejects.toThrow(NotFoundError);
+  });
+
+  // ───── ADR 0011: org name + slug ─────
+
+  it("createOrg persists name and slug round-trip", async () => {
+    const { org } = await store.createOrg({
+      creator: alice,
+      name: "Acme Inc",
+      slug: "acme",
+    });
+    const fetched = await store.getOrg(org.id);
+    expect(fetched.name).toBe("Acme Inc");
+    expect(fetched.slug).toBe("acme");
+  });
+
+  it("createOrg with duplicate slug raises OrgSlugConflictError", async () => {
+    await store.createOrg({ creator: alice, slug: "shared" });
+    await expect(
+      store.createOrg({ creator: bob, slug: "shared" }),
+    ).rejects.toThrow(OrgSlugConflictError);
+  });
+
+  it("createOrg with malformed slug raises PreconditionError", async () => {
+    await expect(
+      store.createOrg({ creator: alice, slug: "AcmeInc" }),
+    ).rejects.toThrow(PreconditionError);
+  });
+
+  it("updateOrg partial-updates name only, leaves slug untouched", async () => {
+    const { org } = await store.createOrg({
+      creator: alice,
+      name: "Old",
+      slug: "old-slug",
+    });
+    const updated = await store.updateOrg({ orgId: org.id, name: "New" });
+    expect(updated.name).toBe("New");
+    expect(updated.slug).toBe("old-slug");
+  });
+
+  it("updateOrg with explicit null clears the slug", async () => {
+    const { org } = await store.createOrg({ creator: alice, slug: "to-clear" });
+    const updated = await store.updateOrg({ orgId: org.id, slug: null });
+    expect(updated.slug).toBeNull();
+  });
+
+  it("updateOrg with conflicting slug raises OrgSlugConflictError", async () => {
+    await store.createOrg({ creator: alice, slug: "alpha" });
+    const { org: bobOrg } = await store.createOrg({
+      creator: bob,
+      slug: "beta",
+    });
+    await expect(
+      store.updateOrg({ orgId: bobOrg.id, slug: "alpha" }),
+    ).rejects.toThrow(OrgSlugConflictError);
+    // The original slug is preserved.
+    const refreshed = await store.getOrg(bobOrg.id);
+    expect(refreshed.slug).toBe("beta");
+  });
+
+  it("updateOrg of revoked org raises AlreadyTerminalError", async () => {
+    const { org } = await store.createOrg({ creator: alice, name: "RIP" });
+    await store.revokeOrg(org.id);
+    await expect(
+      store.updateOrg({ orgId: org.id, name: "Whatever" }),
+    ).rejects.toThrow(AlreadyTerminalError);
   });
 });
 

@@ -19,7 +19,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: flametrench_test
@@ -62,8 +62,16 @@ jobs:
       - name: Typecheck
         run: pnpm -r typecheck
 
-      - name: Test
-        run: pnpm -r test
+      - name: Test (with coverage)
+        run: pnpm -r test --coverage --coverage.reporter=text --coverage.reporter=json-summary
+
+      - name: Upload coverage artifacts
+        if: matrix.node == '22'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: packages/*/coverage/coverage-summary.json
+          if-no-files-found: warn
 
   conformance-drift:
     name: Conformance fixtures match upstream spec

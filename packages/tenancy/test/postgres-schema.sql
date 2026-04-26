@@ -151,20 +151,53 @@ CREATE TABLE ses (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL,
     revoked_at  TIMESTAMPTZ,
+    -- For opaque-token implementations: SHA-256 of the bearer token,
+    -- stored as 32 raw bytes. NULL for JWT-style implementations where
+    -- the token self-verifies. See the comment block below for the
+    -- conformant patterns.
+    token_hash  BYTEA,
 
     CHECK (expires_at > created_at),
-    CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+    CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+    CHECK (token_hash IS NULL OR octet_length(token_hash) = 32)
 );
 
 CREATE INDEX ses_usr_idx    ON ses (usr_id);
 CREATE INDEX ses_active_idx ON ses (usr_id, expires_at)
     WHERE revoked_at IS NULL;
+-- Unique partial index: enforces that no two ACTIVE sessions share a
+-- token hash. Revoked sessions are excluded so the same column may
+-- legitimately hold the historical hash of a rotated token (or NULL,
+-- if the implementation prefers to clear it on revoke).
+CREATE UNIQUE INDEX ses_token_hash_idx ON ses (token_hash)
+    WHERE token_hash IS NOT NULL AND revoked_at IS NULL;
 
--- NOTE on session tokens: the ses.id is the session identifier, not the
--- bearer token. The token carried by the client is opaque to the spec
--- (typically a signed JWT with ses.id as a claim, or an opaque token
--- looked up server-side). Implementations MUST verify token authenticity
--- on each check; the spec does not mandate JWT vs. opaque.
+-- NOTE on session tokens: ses.id is the session identifier, not the
+-- bearer token. The token carried by the client is opaque to the spec.
+-- v0.1 sanctions two implementation patterns:
+--
+--   1. Opaque tokens. The server generates random_bytes(32),
+--      base64url-encodes them, returns to the client, and persists
+--      SHA-256(token) in `ses.token_hash`. On each request the server
+--      computes SHA-256 of the presented token, looks up the row by
+--      token_hash, and constant-time-compares the stored hash. The
+--      reference InMemoryIdentityStore in every SDK uses this pattern.
+--
+--   2. Signed tokens (typically JWT). The token carries ses.id as a
+--      claim and is verified by signature. No server-side lookup of
+--      the token itself is required; revocation works by checking
+--      revoked_at on the session row. `ses.token_hash` stays NULL.
+--
+-- Implementations MUST verify token authenticity on each check.
+-- Implementations using opaque tokens MUST populate ses.token_hash on
+-- session creation. The spec does not mandate either pattern; choose
+-- per the deployment's needs (opaque tokens trade a DB lookup for
+-- simpler revocation semantics; JWT trades signature-verify CPU for
+-- statelessness).
+--
+-- On rotation/revocation: implementations MAY set ses.token_hash to
+-- NULL when revoked_at is set, OR keep the stored hash for forensic
+-- purposes. The unique partial index above accommodates both choices.
 
 -- ===========================================================================
 -- Organizations (org_)
@@ -355,6 +388,247 @@ LANGUAGE SQL STABLE AS $$
 $$;
 
 -- ===========================================================================
+-- v0.2 additions: MFA per ADR 0008 (Proposed)
+-- ===========================================================================
+--
+-- Two new tables and one column extension:
+--
+--   * `mfa` (mfa_)            — per-user factor records (TOTP, WebAuthn, recovery)
+--   * `usr_mfa_policy`        — per-user enforcement policy (1:1 with usr)
+--   * `ses.mfa_verified_at`   — when MFA was last verified for this session;
+--                               nullable column added in v0.2 to support
+--                               step-up auth for sensitive operations.
+--
+-- These ride alongside the v0.1 schema; everything above remains
+-- byte-identical. A v0.1 deployment that adds the v0.2 DDL gains MFA
+-- support without rewriting existing rows.
+--
+-- WebAuthn factor records replace the v0.1 passkey columns on `cred`:
+-- v0.2 treats WebAuthn as a *factor*, not a credential. Existing
+-- passkey-typed creds continue to work for password-less login (the
+-- application chooses); a new WebAuthn-as-MFA factor lives in `mfa` and
+-- is consumed by `verifyMfa`. The two paths coexist by design — see
+-- ADR 0008 §"Why factors not credentials".
+
+-- ---------------------------------------------------------------------------
+-- mfa: per-user factor record
+-- ---------------------------------------------------------------------------
+--
+-- One usr has zero or more mfa rows. Lifecycle mirrors cred (revoke +
+-- re-add via `replaces` chain, partial-unique on active records).
+--
+-- Type-discriminated payload columns: a TOTP factor populates the
+-- totp_* columns and leaves the rest NULL; ditto for webauthn_* and
+-- recovery_*. The CHECK constraint enforces the discrimination.
+--
+-- Storage notes:
+--
+--   * `totp_secret` is stored as raw bytes. Implementations SHOULD
+--     encrypt this column at rest using application-layer encryption
+--     (Postgres-native encryption in `pgcrypto.pgp_sym_encrypt` or a
+--     KMS-backed envelope). The spec does not mandate a particular
+--     encryption scheme; the column stays BYTEA so either ciphertext
+--     or plaintext bytes round-trip.
+--
+--   * `webauthn_public_key` is the COSE_Key bytes from the assertion.
+--     v0.2 SDKs parse only the EC2/P-256/ES256 shape; storing the raw
+--     COSE bytes lets future SDKs add RS256/EdDSA without a schema
+--     migration.
+--
+--   * `recovery_hashes` is a parallel-array pair: one PHC-encoded
+--     Argon2id hash per slot, plus a boolean `recovery_consumed` array
+--     tracking which slots have been used. Both arrays MUST have the
+--     same length (10 in v0.2; CHECK enforces).
+
+CREATE TABLE mfa (
+    id            UUID PRIMARY KEY,
+    usr_id        UUID NOT NULL REFERENCES usr(id),
+    type          TEXT NOT NULL
+                    CHECK (type IN ('totp', 'webauthn', 'recovery')),
+    status        TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('pending', 'active', 'suspended', 'revoked')),
+    replaces      UUID REFERENCES mfa(id),
+
+    -- Human/machine identifier interpreted per type:
+    --   totp      -> human-readable label ("iPhone", "1Password")
+    --   webauthn  -> base64url-encoded WebAuthn credential ID
+    --   recovery  -> NULL (recovery code sets have no identifier)
+    identifier    TEXT,
+
+    -- ── totp-specific ─────────────────────────────────────────────────
+    totp_secret      BYTEA,
+    totp_algorithm   TEXT
+                       CHECK (totp_algorithm IS NULL
+                              OR totp_algorithm IN ('sha1', 'sha256', 'sha512')),
+    totp_digits      SMALLINT
+                       CHECK (totp_digits IS NULL OR totp_digits BETWEEN 6 AND 10),
+    totp_period      SMALLINT
+                       CHECK (totp_period IS NULL OR totp_period BETWEEN 15 AND 120),
+
+    -- ── webauthn-specific ─────────────────────────────────────────────
+    webauthn_public_key  BYTEA,           -- COSE_Key bytes
+    webauthn_sign_count  BIGINT,          -- monotonic counter (WebAuthn §6.1.1)
+    webauthn_rp_id       TEXT,            -- registered RP ID
+    webauthn_aaguid      UUID,            -- authenticator AAGUID (RFC 8809)
+    webauthn_transports  TEXT[],          -- e.g. {'usb','nfc','internal'}
+
+    -- ── recovery-specific ─────────────────────────────────────────────
+    -- Arrays MUST be the same length and equal RECOVERY_CODE_COUNT
+    -- (currently 10). Implementations regenerating a code set MUST
+    -- revoke the old mfa row and insert a new one.
+    recovery_hashes      TEXT[],          -- PHC-encoded Argon2id per slot
+    recovery_consumed    BOOLEAN[],       -- per-slot consumed flag
+
+    -- ── pending → active timing ───────────────────────────────────────
+    -- Pending factors expire after a short window (10 min in the
+    -- reference impl) if not confirmed. SDKs MUST not keep an unbounded
+    -- queue of pending enrollments per user.
+    pending_expires_at   TIMESTAMPTZ,
+
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Type-discriminated required/forbidden columns.
+    CHECK (
+        (type = 'totp'
+            AND totp_secret           IS NOT NULL
+            AND totp_algorithm        IS NOT NULL
+            AND totp_digits           IS NOT NULL
+            AND totp_period           IS NOT NULL
+            AND identifier            IS NOT NULL
+            AND webauthn_public_key   IS NULL
+            AND recovery_hashes       IS NULL)
+     OR (type = 'webauthn'
+            AND webauthn_public_key   IS NOT NULL
+            AND webauthn_sign_count   IS NOT NULL
+            AND webauthn_rp_id        IS NOT NULL
+            AND identifier            IS NOT NULL
+            AND totp_secret           IS NULL
+            AND recovery_hashes       IS NULL)
+     OR (type = 'recovery'
+            AND recovery_hashes       IS NOT NULL
+            AND recovery_consumed     IS NOT NULL
+            AND array_length(recovery_hashes, 1) = array_length(recovery_consumed, 1)
+            AND identifier            IS NULL
+            AND totp_secret           IS NULL
+            AND webauthn_public_key   IS NULL)
+    ),
+
+    -- Recovery factors start active (the user already has the codes);
+    -- TOTP and WebAuthn require confirmation before becoming active.
+    CHECK (
+        (type = 'recovery' AND status <> 'pending')
+     OR (type IN ('totp', 'webauthn'))
+    ),
+
+    -- pending_expires_at MUST be set iff status = 'pending'.
+    CHECK ((status = 'pending') = (pending_expires_at IS NOT NULL))
+);
+
+-- At most one active TOTP factor per user. Multiple WebAuthn factors are
+-- explicitly permitted (a user may register their phone, laptop, and
+-- a roaming hardware key as separate authenticators). At most one
+-- active recovery code set per user; re-enrolling generates a fresh
+-- set and revokes the old.
+CREATE UNIQUE INDEX mfa_unique_active_singleton
+    ON mfa (usr_id, type)
+    WHERE status = 'active' AND type IN ('totp', 'recovery');
+
+-- WebAuthn lookup by credential ID (the identifier column for that type).
+-- Used by verifyMfa to find the factor for an incoming assertion.
+CREATE UNIQUE INDEX mfa_webauthn_credential_id_idx
+    ON mfa (identifier)
+    WHERE type = 'webauthn' AND status = 'active';
+
+CREATE INDEX mfa_usr_idx       ON mfa (usr_id);
+CREATE INDEX mfa_replaces_idx  ON mfa (replaces) WHERE replaces IS NOT NULL;
+CREATE INDEX mfa_pending_idx   ON mfa (pending_expires_at)
+    WHERE status = 'pending';
+
+-- ---------------------------------------------------------------------------
+-- usr_mfa_policy: per-user enforcement policy
+-- ---------------------------------------------------------------------------
+--
+-- Optional row keyed 1:1 to usr. Absent row means "MFA not required."
+-- When `required = true` and `grace_until` is NULL or past, the
+-- verifyPassword path returns the MFA-required signal instead of
+-- minting a session directly.
+--
+-- The grace window exists so admins can roll out an enforcement policy
+-- without locking users out before they've enrolled a factor: set
+-- required=true and grace_until=now()+'14 days', and users have two
+-- weeks to enroll before the gate snaps shut.
+
+CREATE TABLE usr_mfa_policy (
+    usr_id       UUID PRIMARY KEY REFERENCES usr(id),
+    required     BOOLEAN NOT NULL DEFAULT false,
+    grace_until  TIMESTAMPTZ,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- ses.mfa_verified_at: step-up freshness signal
+-- ---------------------------------------------------------------------------
+--
+-- Nullable timestamp recording when MFA was most recently verified on
+-- this session. Apps gating sensitive operations (e.g. "require MFA in
+-- the last 5 minutes to delete a project") consult this column without
+-- inventing a parallel session-tracking layer.
+--
+-- NULL means MFA has not been verified on this session (either the
+-- user has no active factor, or the session was minted via a flow that
+-- doesn't require MFA). A non-null value advances on each successful
+-- verifyMfa call.
+
+ALTER TABLE ses ADD COLUMN mfa_verified_at TIMESTAMPTZ;
+
+-- Optional CHECK: if mfa_verified_at is set, it MUST be ≥ created_at
+-- (you can't verify before the session existed) and ≤ now() (no future
+-- timestamps from a clock-skewed client).
+ALTER TABLE ses ADD CONSTRAINT ses_mfa_verified_after_created
+    CHECK (mfa_verified_at IS NULL OR mfa_verified_at >= created_at);
+
+-- ===========================================================================
+-- v0.2 additions: org display name + slug per ADR 0011 (Proposed)
+-- ===========================================================================
+--
+-- Two nullable columns on org. `name` is free-form; `slug` is
+-- DNS-label-shaped and globally unique when set.
+--
+-- The slug pattern matches `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`:
+-- 1-63 lowercase ASCII chars or digits or hyphens, no leading/trailing
+-- hyphen. The CHECK enforces the format; a partial unique index
+-- enforces uniqueness only over non-NULL values, so multiple orgs
+-- without a slug coexist.
+
+ALTER TABLE org ADD COLUMN name TEXT;
+ALTER TABLE org ADD COLUMN slug TEXT;
+
+ALTER TABLE org ADD CONSTRAINT org_slug_format
+    CHECK (
+        slug IS NULL
+        OR slug ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+    );
+
+CREATE UNIQUE INDEX org_slug_unique ON org (slug)
+    WHERE slug IS NOT NULL;
+
+-- ===========================================================================
+-- v0.2 note: rewrite rules (ADR 0007)
+-- ===========================================================================
+--
+-- ADR 0007 introduces userset_rewrite rules over the tup table — but
+-- the rules themselves are SDK/application configuration, not row-level
+-- data. They live in code or in an app-managed config table; the
+-- reference schema does NOT define a `tup_rule` table. A rule registry
+-- can be added per-deployment as a sibling table; the spec is neutral
+-- on storage.
+--
+-- The tup table itself is unchanged: subject_type stays constrained to
+-- 'usr', and check semantics are still exact-match-then-rule-expansion
+-- with the rule expansion happening above the SQL layer.
+
+-- ===========================================================================
 -- updated_at triggers
 -- ===========================================================================
 
@@ -373,6 +647,12 @@ CREATE TRIGGER cred_touch BEFORE UPDATE ON cred
 CREATE TRIGGER org_touch  BEFORE UPDATE ON org
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 CREATE TRIGGER mem_touch  BEFORE UPDATE ON mem
+    FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
+
+-- v0.2:
+CREATE TRIGGER mfa_touch              BEFORE UPDATE ON mfa
+    FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
+CREATE TRIGGER usr_mfa_policy_touch   BEFORE UPDATE ON usr_mfa_policy
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 
 -- ses, inv, and tup are append-only / lifecycle-terminal; no updated_at.
