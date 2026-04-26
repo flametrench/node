@@ -17,7 +17,33 @@ import {
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
-import type { IdentityStore } from "./store.js";
+import { hashPassword, verifyPasswordHash } from "./hashing.js";
+import {
+  generateRecoveryCodes,
+  generateTotpSecret,
+  isValidRecoveryCode,
+  normalizeRecoveryInput,
+  totpOtpauthUri,
+  totpVerify,
+  type Factor,
+  type MfaProof,
+  type MfaVerifyResult,
+  type RecoveryEnrollmentResult,
+  type RecoveryFactor,
+  type TotpEnrollmentResult,
+  type TotpFactor,
+  type UserMfaPolicy,
+  type WebAuthnEnrollmentResult,
+  type WebAuthnFactor,
+  type WebAuthnProof,
+} from "./mfa.js";
+import type {
+  ConfirmWebAuthnFactorInput,
+  EnrollWebAuthnFactorInput,
+  IdentityStore,
+  SetMfaPolicyInput,
+} from "./store.js";
+import { webauthnVerifyAssertion } from "./webauthn.js";
 import {
   ARGON2ID_FLOOR,
   type CreateCredentialInput,
@@ -638,4 +664,400 @@ export class InMemoryIdentityStore implements IdentityStore {
     this.sessionByTokenHash.delete(entry.tokenHash);
     return updated;
   }
+
+  // ─── v0.2 MFA store operations (ADR 0008) ──────────────────────
+
+  /** Pending TOTP/WebAuthn factor TTL per ADR 0008. */
+  static readonly PENDING_FACTOR_TTL_SECONDS = 600;
+
+  private mfaFactors = new Map<string, Factor>();
+  private mfaTotpSecrets = new Map<string, Uint8Array>();
+  private mfaWebauthnKeys = new Map<string, Uint8Array>();
+  private mfaRecoveryHashes = new Map<string, string[]>();
+  private mfaRecoveryConsumed = new Map<string, boolean[]>();
+  /** Singleton index for at-most-one-active TOTP/recovery per user. */
+  private mfaActiveSingleton = new Map<string, string>(); // `${usrId}|${type}` → mfaId
+  private mfaWebauthnByCredentialId = new Map<string, string>();
+  private mfaPolicies = new Map<string, UserMfaPolicy>();
+
+  private requireFactor(mfaId: string): Factor {
+    const f = this.mfaFactors.get(mfaId);
+    if (!f) throw new NotFoundError(`MFA factor ${mfaId} not found`);
+    return f;
+  }
+
+  private checkUserActive(usrId: UsrId): void {
+    const user = this.users.get(usrId);
+    if (!user) throw new NotFoundError(`User ${usrId} not found`);
+    if (user.status !== "active") {
+      throw new PreconditionError(
+        `User ${usrId} is ${user.status}; cannot enroll MFA`,
+        "user_not_active",
+      );
+    }
+  }
+
+  private enforceNoActiveSingleton(usrId: UsrId, type: "totp" | "recovery"): void {
+    const key = `${usrId}|${type}`;
+    if (this.mfaActiveSingleton.has(key)) {
+      throw new PreconditionError(
+        `User ${usrId} already has an active ${type} factor; revoke before re-enrolling`,
+        "active_singleton_exists",
+      );
+    }
+  }
+
+  private checkPendingNotExpired(factor: Factor): void {
+    if (factor.status !== "pending") return;
+    const ageSec = (this.now().getTime() - factor.createdAt.getTime()) / 1000;
+    if (ageSec > InMemoryIdentityStore.PENDING_FACTOR_TTL_SECONDS) {
+      throw new PreconditionError(
+        `Pending factor ${factor.id} expired ` +
+          `(${ageSec.toFixed(0)}s > ${InMemoryIdentityStore.PENDING_FACTOR_TTL_SECONDS}s)`,
+        "pending_factor_expired",
+      );
+    }
+  }
+
+  async enrollTotpFactor(
+    usrId: UsrId,
+    identifier: string,
+  ): Promise<TotpEnrollmentResult> {
+    this.checkUserActive(usrId);
+    this.enforceNoActiveSingleton(usrId, "totp");
+    const now = this.now();
+    const secret = generateTotpSecret();
+    const mfaId = generate("mfa") as `mfa_${string}`;
+    const factor: TotpFactor = {
+      type: "totp",
+      id: mfaId,
+      usrId,
+      identifier,
+      status: "pending",
+      replaces: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.mfaFactors.set(mfaId, factor);
+    this.mfaTotpSecrets.set(mfaId, secret);
+    const secretB32 = Buffer.from(secret)
+      .toString("base64")
+      .replace(/=+$/, "")
+      // Convert RFC 4648 base64 (used by Buffer) to base32 — re-encode
+      // via a standard helper so the otpauth URI matches.
+      .toUpperCase();
+    // The Python helper produces a true base32; do the same here.
+    const properBase32 = base32Encode(secret);
+    return {
+      factor,
+      secretB32: properBase32,
+      otpauthUri: totpOtpauthUri({
+        secret,
+        label: identifier,
+        issuer: "Flametrench",
+      }),
+    };
+  }
+
+  async enrollWebAuthnFactor(
+    input: EnrollWebAuthnFactorInput,
+  ): Promise<WebAuthnEnrollmentResult> {
+    this.checkUserActive(input.usrId);
+    if (this.mfaWebauthnByCredentialId.has(input.identifier)) {
+      throw new PreconditionError(
+        `WebAuthn credential ${JSON.stringify(input.identifier)} is already enrolled`,
+        "duplicate_webauthn_credential",
+      );
+    }
+    const now = this.now();
+    const mfaId = generate("mfa") as `mfa_${string}`;
+    const factor: WebAuthnFactor = {
+      type: "webauthn",
+      id: mfaId,
+      usrId: input.usrId,
+      identifier: input.identifier,
+      status: "pending",
+      replaces: null,
+      rpId: input.rpId,
+      signCount: input.signCount,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.mfaFactors.set(mfaId, factor);
+    this.mfaWebauthnKeys.set(mfaId, input.publicKey);
+    this.mfaWebauthnByCredentialId.set(input.identifier, mfaId);
+    return { factor };
+  }
+
+  async enrollRecoveryFactor(usrId: UsrId): Promise<RecoveryEnrollmentResult> {
+    this.checkUserActive(usrId);
+    this.enforceNoActiveSingleton(usrId, "recovery");
+    const now = this.now();
+    const codes = generateRecoveryCodes();
+    const hashes = await Promise.all(codes.map((c) => hashPassword(c)));
+    const consumed = codes.map(() => false);
+    const mfaId = generate("mfa") as `mfa_${string}`;
+    const factor: RecoveryFactor = {
+      type: "recovery",
+      id: mfaId,
+      usrId,
+      status: "active",
+      replaces: null,
+      createdAt: now,
+      updatedAt: now,
+      remaining: codes.length,
+    };
+    this.mfaFactors.set(mfaId, factor);
+    this.mfaRecoveryHashes.set(mfaId, hashes);
+    this.mfaRecoveryConsumed.set(mfaId, consumed);
+    this.mfaActiveSingleton.set(`${usrId}|recovery`, mfaId);
+    return { factor, codes };
+  }
+
+  async getMfaFactor(mfaId: string): Promise<Factor> {
+    return this.requireFactor(mfaId);
+  }
+
+  async listMfaFactors(usrId: UsrId): Promise<Factor[]> {
+    return Array.from(this.mfaFactors.values()).filter(
+      (f) => f.usrId === usrId,
+    );
+  }
+
+  async confirmTotpFactor(mfaId: string, code: string): Promise<TotpFactor> {
+    const factor = this.requireFactor(mfaId);
+    if (factor.type !== "totp") {
+      throw new CredentialTypeMismatchError(
+        `Factor ${mfaId} is ${factor.type}, not totp`,
+      );
+    }
+    if (factor.status !== "pending") {
+      throw new PreconditionError(
+        `Factor ${mfaId} is ${factor.status}; only pending factors confirm`,
+        "factor_not_pending",
+      );
+    }
+    this.checkPendingNotExpired(factor);
+    const secret = this.mfaTotpSecrets.get(mfaId)!;
+    const ok = totpVerify(secret, code, {
+      timestamp: Math.floor(this.now().getTime() / 1000),
+    });
+    if (!ok) {
+      throw new InvalidCredentialError("TOTP code did not verify");
+    }
+    const now = this.now();
+    const active: TotpFactor = { ...factor, status: "active", updatedAt: now };
+    this.mfaFactors.set(mfaId, active);
+    this.mfaActiveSingleton.set(`${factor.usrId}|totp`, mfaId);
+    return active;
+  }
+
+  async confirmWebAuthnFactor(
+    input: ConfirmWebAuthnFactorInput,
+  ): Promise<WebAuthnFactor> {
+    const factor = this.requireFactor(input.mfaId);
+    if (factor.type !== "webauthn") {
+      throw new CredentialTypeMismatchError(
+        `Factor ${input.mfaId} is ${factor.type}, not webauthn`,
+      );
+    }
+    if (factor.status !== "pending") {
+      throw new PreconditionError(
+        `Factor ${input.mfaId} is ${factor.status}; only pending factors confirm`,
+        "factor_not_pending",
+      );
+    }
+    this.checkPendingNotExpired(factor);
+    const result = webauthnVerifyAssertion({
+      cosePublicKey: this.mfaWebauthnKeys.get(input.mfaId)!,
+      storedSignCount: factor.signCount,
+      storedRpId: factor.rpId,
+      expectedChallenge: input.expectedChallenge,
+      expectedOrigin: input.expectedOrigin,
+      authenticatorData: input.authenticatorData,
+      clientDataJson: input.clientDataJson,
+      signature: input.signature,
+    });
+    const now = this.now();
+    const active: WebAuthnFactor = {
+      ...factor,
+      status: "active",
+      signCount: result.newSignCount,
+      updatedAt: now,
+    };
+    this.mfaFactors.set(input.mfaId, active);
+    return active;
+  }
+
+  async revokeMfaFactor(mfaId: string): Promise<Factor> {
+    const factor = this.requireFactor(mfaId);
+    if (factor.status === "revoked") return factor;
+    const now = this.now();
+    const revoked = { ...factor, status: "revoked" as const, updatedAt: now };
+    this.mfaFactors.set(mfaId, revoked);
+    if (factor.type === "totp") {
+      this.mfaActiveSingleton.delete(`${factor.usrId}|totp`);
+    } else if (factor.type === "recovery") {
+      this.mfaActiveSingleton.delete(`${factor.usrId}|recovery`);
+    } else if (factor.type === "webauthn") {
+      this.mfaWebauthnByCredentialId.delete(factor.identifier);
+    }
+    return revoked;
+  }
+
+  async verifyMfa(usrId: UsrId, proof: MfaProof): Promise<MfaVerifyResult> {
+    if (proof.type === "totp") return this.verifyTotpProof(usrId, proof.code);
+    if (proof.type === "webauthn") return this.verifyWebAuthnProof(usrId, proof);
+    return this.verifyRecoveryProof(usrId, proof.code);
+  }
+
+  private async verifyTotpProof(
+    usrId: UsrId,
+    code: string,
+  ): Promise<MfaVerifyResult> {
+    const mfaId = this.mfaActiveSingleton.get(`${usrId}|totp`);
+    if (!mfaId) throw new InvalidCredentialError("No active TOTP factor for user");
+    const secret = this.mfaTotpSecrets.get(mfaId)!;
+    const ok = totpVerify(secret, code, {
+      timestamp: Math.floor(this.now().getTime() / 1000),
+    });
+    if (!ok) throw new InvalidCredentialError("TOTP code did not verify");
+    return {
+      mfaId,
+      type: "totp",
+      mfaVerifiedAt: this.now(),
+      newSignCount: null,
+    };
+  }
+
+  private async verifyWebAuthnProof(
+    usrId: UsrId,
+    proof: WebAuthnProof,
+  ): Promise<MfaVerifyResult> {
+    const mfaId = this.mfaWebauthnByCredentialId.get(proof.credentialId);
+    if (!mfaId) {
+      throw new InvalidCredentialError("No WebAuthn factor for credential id");
+    }
+    const factor = this.mfaFactors.get(mfaId);
+    if (!factor || factor.type !== "webauthn") {
+      throw new InvalidCredentialError("Factor is not WebAuthn");
+    }
+    if (factor.usrId !== usrId) {
+      // Generic — don't leak which user owns the credential.
+      throw new InvalidCredentialError("WebAuthn factor does not belong to user");
+    }
+    if (factor.status !== "active") {
+      throw new InvalidCredentialError(
+        `WebAuthn factor is ${factor.status}, not active`,
+      );
+    }
+    const result = webauthnVerifyAssertion({
+      cosePublicKey: this.mfaWebauthnKeys.get(mfaId)!,
+      storedSignCount: factor.signCount,
+      storedRpId: factor.rpId,
+      expectedChallenge: proof.expectedChallenge,
+      expectedOrigin: proof.expectedOrigin,
+      authenticatorData: proof.authenticatorData,
+      clientDataJson: proof.clientDataJson,
+      signature: proof.signature,
+    });
+    const now = this.now();
+    const updated: WebAuthnFactor = {
+      ...factor,
+      signCount: result.newSignCount,
+      updatedAt: now,
+    };
+    this.mfaFactors.set(mfaId, updated);
+    return {
+      mfaId,
+      type: "webauthn",
+      mfaVerifiedAt: now,
+      newSignCount: result.newSignCount,
+    };
+  }
+
+  private async verifyRecoveryProof(
+    usrId: UsrId,
+    code: string,
+  ): Promise<MfaVerifyResult> {
+    const mfaId = this.mfaActiveSingleton.get(`${usrId}|recovery`);
+    if (!mfaId) {
+      throw new InvalidCredentialError("No active recovery factor for user");
+    }
+    const normalized = normalizeRecoveryInput(code);
+    if (!isValidRecoveryCode(normalized)) {
+      throw new InvalidCredentialError("Recovery code is malformed");
+    }
+    const hashes = this.mfaRecoveryHashes.get(mfaId)!;
+    const consumed = this.mfaRecoveryConsumed.get(mfaId)!;
+    // Walk every active slot regardless of an early match — keeps work
+    // constant relative to the active set so timing doesn't leak which
+    // slot matched.
+    let matchedSlot = -1;
+    for (let i = 0; i < hashes.length; i++) {
+      if (consumed[i]) continue;
+      const ok = await verifyPasswordHash(hashes[i]!, normalized);
+      if (ok && matchedSlot === -1) matchedSlot = i;
+    }
+    if (matchedSlot === -1) {
+      throw new InvalidCredentialError("Recovery code did not verify");
+    }
+    consumed[matchedSlot] = true;
+    const factor = this.mfaFactors.get(mfaId);
+    if (factor && factor.type === "recovery") {
+      const remaining = consumed.filter((c) => !c).length;
+      this.mfaFactors.set(mfaId, {
+        ...factor,
+        remaining,
+        updatedAt: this.now(),
+      });
+    }
+    return {
+      mfaId,
+      type: "recovery",
+      mfaVerifiedAt: this.now(),
+      newSignCount: null,
+    };
+  }
+
+  async getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null> {
+    if (!this.users.has(usrId)) {
+      throw new NotFoundError(`User ${usrId} not found`);
+    }
+    return this.mfaPolicies.get(usrId) ?? null;
+  }
+
+  async setMfaPolicy(input: SetMfaPolicyInput): Promise<UserMfaPolicy> {
+    if (!this.users.has(input.usrId)) {
+      throw new NotFoundError(`User ${input.usrId} not found`);
+    }
+    const policy: UserMfaPolicy = {
+      usrId: input.usrId,
+      required: input.required,
+      graceUntil: input.graceUntil ?? null,
+      updatedAt: this.now(),
+    };
+    this.mfaPolicies.set(input.usrId, policy);
+    return policy;
+  }
+}
+
+/** Inline RFC 4648 base32 — the Python SDK uses base64.b32encode for the otpauth URI. */
+function base32Encode(buf: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const b of buf) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 0x1f];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) {
+    out += alphabet[(value << (5 - bits)) & 0x1f];
+  }
+  return out;
 }

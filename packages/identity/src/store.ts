@@ -2,6 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  Factor,
+  MfaProof,
+  MfaVerifyResult,
+  RecoveryEnrollmentResult,
+  TotpEnrollmentResult,
+  TotpFactor,
+  UserMfaPolicy,
+  WebAuthnEnrollmentResult,
+  WebAuthnFactor,
+} from "./mfa.js";
+import type {
   CreateCredentialInput,
   CreateSessionInput,
   CreateSessionResult,
@@ -73,4 +84,62 @@ export interface IdentityStore {
   refreshSession(sesId: SesId): Promise<CreateSessionResult>;
 
   revokeSession(sesId: SesId): Promise<Session>;
+
+  // ─── v0.2 MFA store operations (ADR 0008) ───
+
+  enrollTotpFactor(usrId: UsrId, identifier: string): Promise<TotpEnrollmentResult>;
+  enrollWebAuthnFactor(input: EnrollWebAuthnFactorInput): Promise<WebAuthnEnrollmentResult>;
+  enrollRecoveryFactor(usrId: UsrId): Promise<RecoveryEnrollmentResult>;
+
+  confirmTotpFactor(mfaId: string, code: string): Promise<TotpFactor>;
+  confirmWebAuthnFactor(input: ConfirmWebAuthnFactorInput): Promise<WebAuthnFactor>;
+
+  listMfaFactors(usrId: UsrId): Promise<Factor[]>;
+  getMfaFactor(mfaId: string): Promise<Factor>;
+  revokeMfaFactor(mfaId: string): Promise<Factor>;
+
+  /**
+   * Verify an MFA proof and return the matched factor's id + type.
+   *
+   * Does NOT mint a session — the spec's three-step session flow is
+   * `verifyPassword → verifyMfa → createSession`. WebAuthn proofs
+   * advance and persist the sign count atomically with the verify.
+   *
+   * Throws InvalidCredentialError on mismatch (wrong code, bad
+   * signature, no active factor of the proof's type, etc.).
+   */
+  verifyMfa(usrId: UsrId, proof: MfaProof): Promise<MfaVerifyResult>;
+
+  /** Returns null when the user has no policy row. */
+  getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null>;
+  setMfaPolicy(input: SetMfaPolicyInput): Promise<UserMfaPolicy>;
+}
+
+export interface EnrollWebAuthnFactorInput {
+  usrId: UsrId;
+  /** Base64url-encoded WebAuthn credential ID; SDK indexes on it. */
+  identifier: string;
+  /** COSE_Key bytes from the registration ceremony. */
+  publicKey: Uint8Array;
+  /** Initial sign count from the registration response. */
+  signCount: number;
+  /** RP ID the credential was registered under. */
+  rpId: string;
+  aaguid?: string | null;
+  transports?: string[];
+}
+
+export interface ConfirmWebAuthnFactorInput {
+  mfaId: string;
+  authenticatorData: Uint8Array;
+  clientDataJson: Uint8Array;
+  signature: Uint8Array;
+  expectedChallenge: Uint8Array;
+  expectedOrigin: string;
+}
+
+export interface SetMfaPolicyInput {
+  usrId: UsrId;
+  required: boolean;
+  graceUntil?: Date | null;
 }

@@ -66,12 +66,26 @@ export {
   type Factor,
   type FactorStatus,
   type FactorType,
+  type MfaProof,
+  type MfaVerifyResult,
+  type RecoveryEnrollmentResult,
   type RecoveryFactor,
+  type RecoveryProof,
   type TotpAlgorithm,
+  type TotpEnrollmentResult,
   type TotpFactor,
+  type TotpProof,
   type UserMfaPolicy,
+  type WebAuthnEnrollmentResult,
   type WebAuthnFactor,
+  type WebAuthnProof,
 } from "./mfa.js";
+
+export type {
+  ConfirmWebAuthnFactorInput,
+  EnrollWebAuthnFactorInput,
+  SetMfaPolicyInput,
+} from "./store.js";
 
 export {
   AlreadyTerminalError,

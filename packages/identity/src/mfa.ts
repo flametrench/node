@@ -64,6 +64,92 @@ export interface RecoveryFactor {
 
 export type Factor = TotpFactor | WebAuthnFactor | RecoveryFactor;
 
+// ─── Store-level MFA result + proof types (v0.2 store ops) ───
+
+/**
+ * Returned by IdentityStore.enrollTotpFactor.
+ *
+ * The factor is in 'pending' status until confirmTotpFactor.
+ * `secretB32` and `otpauthUri` are returned ONCE for QR rendering;
+ * the SDK retains the raw secret internally and never re-emits it.
+ */
+export interface TotpEnrollmentResult {
+  factor: TotpFactor;
+  secretB32: string;
+  otpauthUri: string;
+}
+
+/**
+ * Returned by IdentityStore.enrollWebAuthnFactor.
+ *
+ * Factor is created in 'pending' status with the caller-supplied COSE
+ * public key + counter from the registration ceremony. Confirmation
+ * comes from a successful confirmWebAuthnFactor against an assertion
+ * produced by the same authenticator.
+ */
+export interface WebAuthnEnrollmentResult {
+  factor: WebAuthnFactor;
+}
+
+/**
+ * Returned by IdentityStore.enrollRecoveryFactor.
+ *
+ * Factor is active immediately. `codes` is the plaintext set returned
+ * ONCE — the SDK stores Argon2id hashes only.
+ */
+export interface RecoveryEnrollmentResult {
+  factor: RecoveryFactor;
+  codes: string[];
+}
+
+export interface TotpProof {
+  type: "totp";
+  code: string;
+}
+
+/**
+ * Inputs for verifying a WebAuthn assertion against a stored factor.
+ *
+ * `credentialId` matches the `identifier` field on the WebAuthn factor
+ * (base64url-encoded WebAuthn credential ID). The SDK looks up the
+ * factor by this id and runs the assertion against the stored COSE
+ * public key.
+ *
+ * `expectedChallenge` is the raw bytes of the challenge the application
+ * issued for this assertion attempt — challenge issuance is a host
+ * responsibility, not the SDK's.
+ */
+export interface WebAuthnProof {
+  type: "webauthn";
+  credentialId: string;
+  authenticatorData: Uint8Array;
+  clientDataJson: Uint8Array;
+  signature: Uint8Array;
+  expectedChallenge: Uint8Array;
+  expectedOrigin: string;
+}
+
+export interface RecoveryProof {
+  type: "recovery";
+  code: string;
+}
+
+export type MfaProof = TotpProof | WebAuthnProof | RecoveryProof;
+
+/**
+ * Successful IdentityStore.verifyMfa outcome.
+ *
+ * `newSignCount` is set only for WebAuthn proofs. `mfaVerifiedAt` is
+ * the timestamp the SDK stamps on the session (per ADR 0008
+ * `ses.mfa_verified_at`).
+ */
+export interface MfaVerifyResult {
+  mfaId: string;
+  type: FactorType;
+  mfaVerifiedAt: Date;
+  newSignCount: number | null;
+}
+
 // ─── User MFA policy ───
 
 export interface UserMfaPolicy {
