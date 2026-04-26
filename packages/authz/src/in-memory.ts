@@ -9,6 +9,12 @@ import {
   InvalidFormatError,
   TupleNotFoundError,
 } from "./errors.js";
+import {
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_FAN_OUT,
+  evaluate,
+  type Rules,
+} from "./rewrite-rules.js";
 import type { TupleStore } from "./store.js";
 import {
   RELATION_NAME_PATTERN,
@@ -28,6 +34,16 @@ import {
 export interface InMemoryTupleStoreOptions {
   /** Override the clock for deterministic tests. Default `() => new Date()`. */
   clock?: () => Date;
+  /**
+   * v0.2: optional rewrite rules. When unset, the store behaves
+   * byte-identically to v0.1 — only direct natural-key matches succeed.
+   * See ADR 0007 for the rule grammar and evaluation semantics.
+   */
+  rules?: Rules;
+  /** v0.2: rule-evaluation depth ceiling. Spec floor: 8. */
+  maxDepth?: number;
+  /** v0.2: rule-evaluation fan-out ceiling per tuple_to_userset hop. Spec floor: 1024. */
+  maxFanOut?: number;
 }
 
 /**
@@ -43,9 +59,15 @@ export class InMemoryTupleStore implements TupleStore {
   /** Secondary index: natural key → tuple id. */
   private readonly keyIndex = new Map<string, TupId>();
   private readonly clock: () => Date;
+  private readonly rules: Rules | null;
+  private readonly maxDepth: number;
+  private readonly maxFanOut: number;
 
   constructor(options: InMemoryTupleStoreOptions = {}) {
     this.clock = options.clock ?? (() => new Date());
+    this.rules = options.rules ?? null;
+    this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    this.maxFanOut = options.maxFanOut ?? DEFAULT_MAX_FAN_OUT;
   }
 
   private now(): Date {
@@ -158,6 +180,8 @@ export class InMemoryTupleStore implements TupleStore {
   // ─── check() primitives ───
 
   async check(input: CheckInput): Promise<CheckResult> {
+    // v0.1 fast path: direct natural-key lookup. Returns immediately
+    // on a direct hit regardless of whether rules are registered.
     const key = InMemoryTupleStore.naturalKey(
       input.subjectType,
       input.subjectId,
@@ -165,26 +189,89 @@ export class InMemoryTupleStore implements TupleStore {
       input.objectType,
       input.objectId,
     );
-    const tupId = this.keyIndex.get(key) ?? null;
-    return { allowed: tupId !== null, matchedTupleId: tupId };
+    const direct = this.keyIndex.get(key);
+    if (direct !== undefined) {
+      return { allowed: true, matchedTupleId: direct };
+    }
+
+    // v0.2 path: rule expansion only when a direct lookup misses
+    // AND rules are registered. With rules=null, behavior is
+    // byte-identical to v0.1.
+    if (this.rules === null) {
+      return { allowed: false, matchedTupleId: null };
+    }
+
+    const result = evaluate({
+      rules: this.rules,
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      relation: input.relation,
+      objectType: input.objectType,
+      objectId: input.objectId,
+      directLookup: this.directLookup,
+      listByObject: this.listByObject,
+      maxDepth: this.maxDepth,
+      maxFanOut: this.maxFanOut,
+    });
+    return {
+      allowed: result.allowed,
+      matchedTupleId: result.matchedTupleId as TupId | null,
+    };
   }
+
+  /** Direct natural-key lookup callback for the rule evaluator. */
+  private directLookup = (
+    subjectType: string,
+    subjectId: string,
+    relation: string,
+    objectType: string,
+    objectId: string,
+  ): string | null => {
+    const key = InMemoryTupleStore.naturalKey(
+      subjectType as SubjectType,
+      subjectId as UsrId,
+      relation,
+      objectType,
+      objectId,
+    );
+    return this.keyIndex.get(key) ?? null;
+  };
+
+  /** Enumerate tuples on an object by relation. Used by tuple_to_userset. */
+  private listByObject = (
+    objectType: string,
+    objectId: string,
+    relation: string | null,
+  ): Iterable<{ subjectType: string; subjectId: string; tupId: string }> => {
+    const out: Array<{ subjectType: string; subjectId: string; tupId: string }> =
+      [];
+    for (const t of this.tuples.values()) {
+      if (t.objectType !== objectType || t.objectId !== objectId) continue;
+      if (relation !== null && t.relation !== relation) continue;
+      out.push({
+        subjectType: t.subjectType,
+        subjectId: t.subjectId,
+        tupId: t.id,
+      });
+    }
+    return out;
+  };
 
   async checkAny(input: CheckSetInput): Promise<CheckResult> {
     if (input.relations.length === 0) {
       throw new EmptyRelationSetError();
     }
     for (const relation of input.relations) {
-      const key = InMemoryTupleStore.naturalKey(
-        input.subjectType,
-        input.subjectId,
+      // Reuse rule-aware check() so checkAny benefits from rewrites
+      // when registered.
+      const result = await this.check({
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
         relation,
-        input.objectType,
-        input.objectId,
-      );
-      const tupId = this.keyIndex.get(key);
-      if (tupId !== undefined) {
-        return { allowed: true, matchedTupleId: tupId };
-      }
+        objectType: input.objectType,
+        objectId: input.objectId,
+      });
+      if (result.allowed) return result;
     }
     return { allowed: false, matchedTupleId: null };
   }

@@ -54,3 +54,19 @@ export class EmptyRelationSetError extends AuthzError {
     this.name = "EmptyRelationSetError";
   }
 }
+
+/**
+ * Rewrite-rule evaluation exceeded a configured bound (depth or fan-out).
+ *
+ * Bounds are configurable per-store; the spec floor is depth=8,
+ * fan-out=1024. Apps hitting this in practice should restructure their
+ * rule set or explicitly raise the limit.
+ *
+ * v0.2; see ADR 0007.
+ */
+export class EvaluationLimitExceededError extends AuthzError {
+  constructor(message: string) {
+    super(message, "evaluation_limit_exceeded");
+    this.name = "EvaluationLimitExceededError";
+  }
+}

@@ -34,6 +34,18 @@ export {
   AuthzError,
   DuplicateTupleError,
   EmptyRelationSetError,
+  EvaluationLimitExceededError,
   InvalidFormatError,
   TupleNotFoundError,
 } from "./errors.js";
+
+export {
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_FAN_OUT,
+  type ComputedUserset,
+  type Rule,
+  type RuleNode,
+  type Rules,
+  type ThisNode,
+  type TupleToUserset,
+} from "./rewrite-rules.js";

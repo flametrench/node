@@ -21,6 +21,9 @@ import {
   EmptyRelationSetError,
   InMemoryTupleStore,
   InvalidFormatError,
+  type Rule,
+  type RuleNode,
+  type Rules,
   type SubjectType,
   type UsrId,
 } from "../src/index.js";
@@ -80,6 +83,48 @@ interface FixtureTest {
     result?: unknown;
     error?: string;
   };
+  /** v0.2: optional rewrite rules registered before the test runs. */
+  rules?: Record<string, Record<string, RuleNode[]>>;
+}
+
+/**
+ * Convert the JSON canonical rule shape to the SDK's typed Rules.
+ *
+ * The wire format uses snake_case keys (`tupleset_relation`); the SDK
+ * uses camelCase (`tuplesetRelation`). The TypeScript discriminated
+ * union has the exact same shape as the JSON, so we just structurally
+ * remap the keys per node.
+ */
+function rulesFromWire(
+  raw: Record<string, Record<string, unknown[]>> | undefined,
+): Rules | undefined {
+  if (!raw) return undefined;
+  const out: { [objectType: string]: { [relation: string]: Rule } } = {};
+  for (const [objectType, relations] of Object.entries(raw)) {
+    out[objectType] = {};
+    for (const [relation, nodes] of Object.entries(relations)) {
+      out[objectType]![relation] = (nodes as Array<Record<string, unknown>>).map(
+        ruleNodeFromWire,
+      );
+    }
+  }
+  return out;
+}
+
+function ruleNodeFromWire(node: Record<string, unknown>): RuleNode {
+  const type = node.type as string;
+  if (type === "this") return { type: "this" };
+  if (type === "computed_userset") {
+    return { type: "computed_userset", relation: node.relation as string };
+  }
+  if (type === "tuple_to_userset") {
+    return {
+      type: "tuple_to_userset",
+      tuplesetRelation: node.tupleset_relation as string,
+      computedUsersetRelation: node.computed_userset_relation as string,
+    };
+  }
+  throw new Error(`Unknown rule node type: ${type}`);
 }
 
 interface FixtureFile {
@@ -244,3 +289,47 @@ async function seed(store: InMemoryTupleStore, given: WireTuple[]): Promise<void
     },
   );
 }
+
+// ─── v0.2: authorization.check with rewrite rules ───
+//
+// Per ADR 0007. Each test optionally declares a `rules` field; the
+// harness instantiates the store with those rules registered before
+// running the check. With rules absent or {}, behavior is byte-identical
+// to v0.1.
+
+function rewriteFixtureBlock(relativePath: string, suffix: string) {
+  const fixture = loadFixture(relativePath);
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · ${suffix}`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, async () => {
+          const store = new InMemoryTupleStore({
+            rules: rulesFromWire(t.rules),
+          });
+          const input = t.input as {
+            given_tuples: WireTuple[];
+            check: WireCheck;
+          };
+          await seed(store, input.given_tuples);
+          const result = await store.check(tupleFromWire(input.check));
+          const expected = t.expected.result as { allowed: boolean };
+          expect(result.allowed).toBe(expected.allowed);
+        });
+      }
+    },
+  );
+}
+
+rewriteFixtureBlock(
+  "authorization/rewrite-rules/computed-userset.json",
+  "rewrite · computed_userset",
+);
+rewriteFixtureBlock(
+  "authorization/rewrite-rules/tuple-to-userset.json",
+  "rewrite · tuple_to_userset",
+);
+rewriteFixtureBlock(
+  "authorization/rewrite-rules/empty-rules-equals-v01.json",
+  "rewrite · empty-rules-equals-v01",
+);
