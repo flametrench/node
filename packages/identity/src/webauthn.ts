@@ -186,12 +186,29 @@ function decodeItem(d: CborDecoder): unknown {
   throw new WebAuthnMalformedError(`Unsupported CBOR major type: ${major}`);
 }
 
-interface Es256Coords {
+/** Minimum RSA modulus per ADR 0010 / WebAuthn §5.8.5. */
+const RSA_MIN_KEY_SIZE_BITS = 2048;
+
+/** COSE alg values (RFC 8152 §13). */
+type CoseAlg = -7 | -257 | -8;
+
+interface CoseEs256 {
+  alg: -7;
   x: Uint8Array;
   y: Uint8Array;
 }
+interface CoseRs256 {
+  alg: -257;
+  n: Uint8Array;
+  e: Uint8Array;
+}
+interface CoseEddsa {
+  alg: -8;
+  x: Uint8Array;
+}
+type ParsedCose = CoseEs256 | CoseRs256 | CoseEddsa;
 
-function parseCoseEs256(coseKey: Uint8Array): Es256Coords {
+function parseCoseKey(coseKey: Uint8Array): ParsedCose {
   const d: CborDecoder = { buf: coseKey, offset: 0 };
   const value = decodeItem(d);
   if (d.offset !== coseKey.length) {
@@ -202,25 +219,79 @@ function parseCoseEs256(coseKey: Uint8Array): Es256Coords {
   }
   const kty = value.get(1);
   const alg = value.get(3);
-  const crv = value.get(-1);
-  const x = value.get(-2);
-  const y = value.get(-3);
-  if (kty !== 2) {
-    throw new WebAuthnUnsupportedKeyError(`Unsupported COSE kty: ${String(kty)}`);
+  if (alg === -7) {
+    if (kty !== 2) {
+      throw new WebAuthnUnsupportedKeyError(`ES256 requires COSE kty=2, got ${String(kty)}`);
+    }
+    const crv = value.get(-1);
+    const x = value.get(-2);
+    const y = value.get(-3);
+    if (crv !== 1) {
+      throw new WebAuthnUnsupportedKeyError(`ES256 requires crv=1, got ${String(crv)}`);
+    }
+    if (!(x instanceof Uint8Array) || x.length !== 32) {
+      throw new WebAuthnMalformedError("COSE x coordinate must be 32 bytes");
+    }
+    if (!(y instanceof Uint8Array) || y.length !== 32) {
+      throw new WebAuthnMalformedError("COSE y coordinate must be 32 bytes");
+    }
+    return { alg: -7, x, y };
   }
-  if (alg !== -7) {
-    throw new WebAuthnUnsupportedKeyError(`Unsupported COSE alg: ${String(alg)}`);
+  if (alg === -257) {
+    if (kty !== 3) {
+      throw new WebAuthnUnsupportedKeyError(`RS256 requires COSE kty=3, got ${String(kty)}`);
+    }
+    const n = value.get(-1);
+    const e = value.get(-2);
+    if (!(n instanceof Uint8Array)) {
+      throw new WebAuthnMalformedError("COSE RSA modulus (n) must be a byte string");
+    }
+    if (!(e instanceof Uint8Array)) {
+      throw new WebAuthnMalformedError("COSE RSA exponent (e) must be a byte string");
+    }
+    // Strip a single leading 0x00 (CBOR positive-int convention) so
+    // bit-length is computed on the value, not the encoding.
+    const nTrimmed = n.length > 0 && n[0] === 0 ? n.subarray(1) : n;
+    const bits = nTrimmed.length * 8 - leadingZeroBits(nTrimmed);
+    if (bits < RSA_MIN_KEY_SIZE_BITS) {
+      throw new WebAuthnUnsupportedKeyError(
+        `RSA key ${bits}-bit is below the ${RSA_MIN_KEY_SIZE_BITS}-bit floor`,
+      );
+    }
+    return { alg: -257, n, e };
   }
-  if (crv !== 1) {
-    throw new WebAuthnUnsupportedKeyError(`Unsupported COSE crv: ${String(crv)}`);
+  if (alg === -8) {
+    if (kty !== 1) {
+      throw new WebAuthnUnsupportedKeyError(`EdDSA requires COSE kty=1, got ${String(kty)}`);
+    }
+    const crv = value.get(-1);
+    const x = value.get(-2);
+    if (crv !== 6) {
+      throw new WebAuthnUnsupportedKeyError(
+        `v0.2 EdDSA accepts only Ed25519 (crv=6), got crv=${String(crv)}`,
+      );
+    }
+    if (!(x instanceof Uint8Array) || x.length !== 32) {
+      throw new WebAuthnMalformedError("Ed25519 public key must be 32 bytes");
+    }
+    return { alg: -8, x };
   }
-  if (!(x instanceof Uint8Array) || x.length !== 32) {
-    throw new WebAuthnMalformedError("COSE x coordinate must be 32 bytes");
+  throw new WebAuthnUnsupportedKeyError(
+    `Unsupported COSE alg: ${String(alg)} (kty=${String(kty)})`,
+  );
+}
+
+/** Count leading zero bits of the most-significant byte in a big-endian unsigned int. */
+function leadingZeroBits(buf: Uint8Array): number {
+  if (buf.length === 0) return 0;
+  let b = buf[0]!;
+  if (b === 0) return 8;
+  let n = 0;
+  while ((b & 0x80) === 0) {
+    b <<= 1;
+    n++;
   }
-  if (!(y instanceof Uint8Array) || y.length !== 32) {
-    throw new WebAuthnMalformedError("COSE y coordinate must be 32 bytes");
-  }
-  return { x, y };
+  return n;
 }
 
 // ─── Authenticator data ──────────────────────────────────────────
@@ -400,38 +471,57 @@ export function webauthnVerifyAssertion(
     );
   }
 
-  // Verify ES256 signature over authData || sha256(clientDataJSON).
-  const { x, y } = parseCoseEs256(input.cosePublicKey);
-  const publicKey = createPublicKey({
-    key: {
-      kty: "EC",
-      crv: "P-256",
-      x: b64urlEncode(x),
-      y: b64urlEncode(y),
-    },
-    format: "jwk",
-  });
+  // Verify the signature over authData || sha256(clientDataJSON).
+  // Algorithm dispatch per ADR 0010: COSE_Key.alg picks the verifier.
+  const cose = parseCoseKey(input.cosePublicKey);
   const clientHash = createHash("sha256").update(input.clientDataJson).digest();
   const signed = Buffer.concat([
     Buffer.from(input.authenticatorData),
     clientHash,
   ]);
 
-  if (input.signature.length < 8 || input.signature[0]! !== 0x30) {
-    throw new WebAuthnSignatureError("Signature is not a DER ECDSA structure");
-  }
-
   let ok: boolean;
   try {
-    ok = cryptoVerify(
-      "sha256",
-      signed,
-      { key: publicKey, dsaEncoding: "der" },
-      Buffer.from(input.signature),
-    );
+    if (cose.alg === -7) {
+      // ES256 — DER-encoded ECDSA signature.
+      if (input.signature.length < 8 || input.signature[0]! !== 0x30) {
+        throw new WebAuthnSignatureError("Signature is not a DER ECDSA structure");
+      }
+      const publicKey = createPublicKey({
+        key: { kty: "EC", crv: "P-256", x: b64urlEncode(cose.x), y: b64urlEncode(cose.y) },
+        format: "jwk",
+      });
+      ok = cryptoVerify(
+        "sha256",
+        signed,
+        { key: publicKey, dsaEncoding: "der" },
+        Buffer.from(input.signature),
+      );
+    } else if (cose.alg === -257) {
+      // RS256 — raw RSASSA-PKCS1-v1_5 signature.
+      const publicKey = createPublicKey({
+        key: { kty: "RSA", n: b64urlEncode(stripLeadingZero(cose.n)), e: b64urlEncode(stripLeadingZero(cose.e)) },
+        format: "jwk",
+      });
+      ok = cryptoVerify("sha256", signed, publicKey, Buffer.from(input.signature));
+    } else {
+      // EdDSA / Ed25519 — 64 raw bytes; pass `null` algorithm to crypto.verify.
+      if (input.signature.length !== 64) {
+        throw new WebAuthnSignatureError(
+          `Ed25519 signature must be 64 bytes, got ${input.signature.length}`,
+        );
+      }
+      const publicKey = createPublicKey({
+        key: { kty: "OKP", crv: "Ed25519", x: b64urlEncode(cose.x) },
+        format: "jwk",
+      });
+      ok = cryptoVerify(null, signed, publicKey, Buffer.from(input.signature));
+    }
   } catch (err) {
-    // node:crypto throws on malformed DER (e.g. a tampered length byte);
-    // the caller's contract is the same as a verify-returns-false case.
+    if (err instanceof WebAuthnError) throw err;
+    // node:crypto throws on malformed DER (tampered length byte) or
+    // structurally-invalid signatures. Treat identically to a verify-
+    // returns-false case.
     throw new WebAuthnSignatureError(
       `Signature verification threw: ${(err as Error).message}`,
     );
@@ -441,4 +531,9 @@ export function webauthnVerifyAssertion(
   }
 
   return { newSignCount };
+}
+
+/** Strip a single leading 0x00 from an unsigned big-endian integer encoding. */
+function stripLeadingZero(buf: Uint8Array): Uint8Array {
+  return buf.length > 0 && buf[0] === 0 ? buf.subarray(1) : buf;
 }

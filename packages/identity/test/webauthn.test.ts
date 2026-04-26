@@ -261,7 +261,8 @@ describe("webauthnVerifyAssertion", () => {
     const auth = makeAuthData({ signCount: 2 });
     const client = makeClientData();
     const sig = Buffer.from(signMessage(privateKey, auth, client));
-    sig[sig.length - 1] ^= 0x01;
+    const last = sig.length - 1;
+    sig[last] = sig[last]! ^ 0x01;
     expect(() =>
       webauthnVerifyAssertion({
         cosePublicKey: cose,

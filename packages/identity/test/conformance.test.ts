@@ -173,6 +173,7 @@ function runWebauthn(
 for (const path of [
   "identity/mfa/webauthn-assertion.json",
   "identity/mfa/webauthn-counter-decrease-rejected.json",
+  "identity/mfa/webauthn-assertion-algorithms.json",
 ]) {
   const fixture = loadFixture(path);
   const shared = (fixture.shared ?? {}) as WebAuthnFixtureInput;
