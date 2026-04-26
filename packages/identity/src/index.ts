@@ -47,6 +47,32 @@ export {
 
 export { hashPassword, verifyPasswordHash } from "./hashing.js";
 
+// v0.2 — MFA primitives (Proposed; ADR 0008)
+export {
+  DEFAULT_TOTP_ALGORITHM,
+  DEFAULT_TOTP_DIGITS,
+  DEFAULT_TOTP_PERIOD,
+  RECOVERY_CODE_COUNT,
+  RECOVERY_CODE_LENGTH,
+  generateRecoveryCode,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  isMfaPolicyActiveNow,
+  isValidRecoveryCode,
+  normalizeRecoveryInput,
+  totpCompute,
+  totpOtpauthUri,
+  totpVerify,
+  type Factor,
+  type FactorStatus,
+  type FactorType,
+  type RecoveryFactor,
+  type TotpAlgorithm,
+  type TotpFactor,
+  type UserMfaPolicy,
+  type WebAuthnFactor,
+} from "./mfa.js";
+
 export {
   AlreadyTerminalError,
   CredentialNotActiveError,

@@ -24,6 +24,8 @@ export const TYPES = {
   ses: "session",
   cred: "credential",
   tup: "authorization_tuple",
+  // v0.2 — Proposed (ADR 0008)
+  mfa: "mfa_factor",
 } as const satisfies Record<string, string>;
 
 export type IdType = keyof typeof TYPES;

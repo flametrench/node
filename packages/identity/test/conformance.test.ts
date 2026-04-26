@@ -21,7 +21,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { verifyPasswordHash } from "../src/index.js";
+import {
+  isValidRecoveryCode,
+  totpCompute,
+  verifyPasswordHash,
+} from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(__dirname, "conformance/fixtures");
@@ -68,6 +72,50 @@ function loadFixture(relativePath: string): FixtureFile {
             input.candidate_password,
           );
           expect(result).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.2: identity.totp_compute (RFC 6238) ───
+
+{
+  const fixture = loadFixture("identity/mfa/totp-rfc6238.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · RFC 6238`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as {
+            secret_ascii: string;
+            timestamp: number;
+            digits: number;
+            algorithm: "sha1" | "sha256" | "sha512";
+          };
+          const secret = new TextEncoder().encode(input.secret_ascii);
+          const result = totpCompute(secret, input.timestamp, {
+            digits: input.digits,
+            algorithm: input.algorithm,
+          });
+          expect(result).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.2: identity.generate_recovery_code (format predicate) ───
+
+{
+  const fixture = loadFixture("identity/mfa/recovery-code-format.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · format`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { code: string };
+          expect(isValidRecoveryCode(input.code)).toBe(t.expected.result);
         });
       }
     },
