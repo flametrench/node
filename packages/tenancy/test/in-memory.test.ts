@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   DuplicateMembershipError,
   ForbiddenError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
   InMemoryTenancyStore,
   InvitationExpiredError,
   InvitationNotPendingError,
@@ -472,6 +474,7 @@ describe("InMemoryTenancyStore", () => {
       const result = await store.acceptInvitation({
         invId: inv.id,
         asUsrId: bob,
+        acceptingIdentifier: "bob@example.com",
       });
       expect(result.membership.usrId).toBe(bob);
       expect(result.membership.role).toBe("member");
@@ -501,6 +504,7 @@ describe("InMemoryTenancyStore", () => {
       const result = await store.acceptInvitation({
         invId: inv.id,
         asUsrId: carol,
+        acceptingIdentifier: "carol@example.com",
       });
       expect(result.materializedTuples).toHaveLength(1);
       const tuples = await store.listTuplesForSubject("usr", carol);
@@ -538,9 +542,17 @@ describe("InMemoryTenancyStore", () => {
         invitedBy: alice,
         expiresAt: new Date(Date.now() + 3600_000),
       });
-      await store.acceptInvitation({ invId: inv.id, asUsrId: bob });
+      await store.acceptInvitation({
+        invId: inv.id,
+        asUsrId: bob,
+        acceptingIdentifier: "x@y",
+      });
       await expect(
-        store.acceptInvitation({ invId: inv.id, asUsrId: carol }),
+        store.acceptInvitation({
+          invId: inv.id,
+          asUsrId: carol,
+          acceptingIdentifier: "x@y",
+        }),
       ).rejects.toThrow(InvitationNotPendingError);
     });
 
@@ -593,7 +605,11 @@ describe("InMemoryTenancyStore", () => {
       // Burn ~200 ticks to push the clock past expiresAt.
       for (let i = 0; i < 200; i++) shortClock();
       await expect(
-        shortStore.acceptInvitation({ invId: inv2.id, asUsrId: bob }),
+        shortStore.acceptInvitation({
+          invId: inv2.id,
+          asUsrId: bob,
+          acceptingIdentifier: "x@y",
+        }),
       ).rejects.toThrow(InvitationExpiredError);
       // Silence unused var warnings for the earlier incomplete code paths.
       void inv;
@@ -611,8 +627,44 @@ describe("InMemoryTenancyStore", () => {
         expiresAt: new Date(Date.now() + 3600_000),
       });
       await expect(
-        store.acceptInvitation({ invId: inv.id, asUsrId: bob }),
+        store.acceptInvitation({
+          invId: inv.id,
+          asUsrId: bob,
+          acceptingIdentifier: "bob@example.com",
+        }),
       ).rejects.toThrow(DuplicateMembershipError);
+    });
+
+    it("(ADR 0009) requires acceptingIdentifier when asUsrId is provided", async () => {
+      const { org } = await store.createOrg(alice);
+      const inv = await store.createInvitation({
+        orgId: org.id,
+        identifier: "bob@example.com",
+        role: "member",
+        invitedBy: alice,
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
+      await expect(
+        store.acceptInvitation({ invId: inv.id, asUsrId: bob }),
+      ).rejects.toThrow(IdentifierBindingRequiredError);
+    });
+
+    it("(ADR 0009) rejects mismatched acceptingIdentifier (privilege-escalation closer)", async () => {
+      const { org } = await store.createOrg(alice);
+      const inv = await store.createInvitation({
+        orgId: org.id,
+        identifier: "victim@example.org",
+        role: "owner",
+        invitedBy: alice,
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
+      await expect(
+        store.acceptInvitation({
+          invId: inv.id,
+          asUsrId: bob,
+          acceptingIdentifier: "attacker@example.com",
+        }),
+      ).rejects.toThrow(IdentifierMismatchError);
     });
   });
 

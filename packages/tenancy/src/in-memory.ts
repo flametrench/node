@@ -7,6 +7,8 @@ import {
   AlreadyTerminalError,
   DuplicateMembershipError,
   ForbiddenError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
@@ -594,6 +596,18 @@ export class InMemoryTenancyStore implements TenancyStore {
       throw new InvitationExpiredError(
         `Invitation ${input.invId} expired at ${inv.expiresAt.toISOString()}`,
       );
+    }
+    // ADR 0009: existing-user accept MUST supply a matching identifier.
+    if (input.asUsrId !== undefined && input.asUsrId !== null) {
+      if (
+        input.acceptingIdentifier === undefined ||
+        input.acceptingIdentifier === null
+      ) {
+        throw new IdentifierBindingRequiredError();
+      }
+      if (input.acceptingIdentifier !== inv.identifier) {
+        throw new IdentifierMismatchError(input.acceptingIdentifier, inv.identifier);
+      }
     }
     const usrId = input.asUsrId ?? this.newUsrId();
     if (this.findActiveMembership(usrId, inv.orgId)) {

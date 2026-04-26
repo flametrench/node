@@ -36,6 +36,8 @@ import {
   AlreadyTerminalError,
   DuplicateMembershipError,
   ForbiddenError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
   InMemoryTenancyStore,
   InvitationExpiredError,
   InvitationNotPendingError,
@@ -64,6 +66,8 @@ const ERROR_CLASSES = {
   PreconditionError,
   AlreadyTerminalError,
   NotFoundError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
 } as const;
 
 interface FixtureFile {
@@ -234,6 +238,7 @@ async function invokeOp(
       return store.acceptInvitation({
         invId: args.inv_id as `inv_${string}`,
         asUsrId: args.as_usr_id as UsrId | undefined,
+        acceptingIdentifier: args.accepting_identifier as string | undefined,
       });
 
     case "decline_invitation":
@@ -270,6 +275,12 @@ async function invokeOp(
     case "assert_equal":
       expect(args.actual).toBe(args.expected);
       return null;
+
+    case "assert_invitation_status": {
+      const inv = await store.getInvitation(args.inv_id as `inv_${string}`);
+      expect(inv.status).toBe(args.expected_status);
+      return null;
+    }
 
     default:
       throw new Error(`Unknown fixture op: ${op}`);
@@ -320,6 +331,7 @@ for (const [name, file] of [
   ["tenancy.transfer_ownership", "tenancy/transfer-ownership.json"],
   ["tenancy.admin_remove", "tenancy/admin-remove.json"],
   ["tenancy.accept_invitation", "tenancy/invitation-accept.json"],
+  ["tenancy.accept_invitation.binding", "tenancy/invitation-accept-binding.json"],
 ] as const) {
   const fixture = loadFixture(file);
   describe(`Conformance · ${name} [${fixture.conformance_level}]`, () => {

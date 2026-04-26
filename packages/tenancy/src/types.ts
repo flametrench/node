@@ -160,6 +160,15 @@ export interface AcceptInvitationInput {
   invId: InvId;
   /** If the invitee already has an account, pass their `usr_` id. */
   asUsrId?: UsrId;
+  /**
+   * Required when {@link asUsrId} is provided. Per ADR 0009, the SDK
+   * byte-compares this against `invitation.identifier`; mismatch raises
+   * `IdentifierMismatchError`, omission raises
+   * `IdentifierBindingRequiredError`. The host MUST source this from
+   * the authenticated session (typically the canonical email/handle
+   * attached to the bearer token), NOT from the request body.
+   */
+  acceptingIdentifier?: string;
 }
 
 export interface AcceptInvitationResult {

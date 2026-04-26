@@ -104,3 +104,41 @@ export class PreconditionError extends TenancyError {
     this.name = "PreconditionError";
   }
 }
+
+/**
+ * `acceptInvitation` was called with `asUsrId` but no `acceptingIdentifier`.
+ *
+ * Per ADR 0009, the SDK fails closed: callers MUST supply
+ * `acceptingIdentifier` whenever they assert an existing `asUsrId`. The
+ * mint-new-user path (`asUsrId` omitted) does not need this parameter.
+ */
+export class IdentifierBindingRequiredError extends PreconditionError {
+  constructor(
+    message = "acceptInvitation requires acceptingIdentifier when asUsrId is provided",
+  ) {
+    super(message, "identifier_binding_required");
+    this.name = "IdentifierBindingRequiredError";
+  }
+}
+
+/**
+ * The supplied `acceptingIdentifier` does not match `invitation.identifier`.
+ *
+ * Per ADR 0009, this byte-equality check is the SDK's contribution to
+ * closing the privilege-escalation primitive in spec#5: an attacker
+ * substituting a foreign `usr_id` will fail to also produce a matching
+ * identifier sourced from the authenticated session.
+ */
+export class IdentifierMismatchError extends PreconditionError {
+  constructor(
+    public readonly acceptingIdentifier: string,
+    public readonly invitationIdentifier: string,
+  ) {
+    super(
+      `acceptingIdentifier ${JSON.stringify(acceptingIdentifier)} does not match ` +
+        `invitation.identifier ${JSON.stringify(invitationIdentifier)}`,
+      "identifier_mismatch",
+    );
+    this.name = "IdentifierMismatchError";
+  }
+}

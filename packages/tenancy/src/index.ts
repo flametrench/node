@@ -62,6 +62,8 @@ export {
   AlreadyTerminalError,
   DuplicateMembershipError,
   ForbiddenError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,

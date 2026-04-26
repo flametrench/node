@@ -250,6 +250,7 @@ describe.skipIf(!hasPostgres)("PostgresTenancyStore", () => {
     const result = await store.acceptInvitation({
       invId: inv.id,
       asUsrId: carol,
+      acceptingIdentifier: "carol@example.com",
     });
     expect(result.materializedTuples).toHaveLength(1);
     expect(result.invitation.status).toBe("accepted");
@@ -269,9 +270,17 @@ describe.skipIf(!hasPostgres)("PostgresTenancyStore", () => {
       invitedBy: alice,
       expiresAt: new Date(Date.now() + 3600_000),
     });
-    await store.acceptInvitation({ invId: inv.id, asUsrId: bob });
+    await store.acceptInvitation({
+      invId: inv.id,
+      asUsrId: bob,
+      acceptingIdentifier: "x@y",
+    });
     await expect(
-      store.acceptInvitation({ invId: inv.id, asUsrId: carol }),
+      store.acceptInvitation({
+        invId: inv.id,
+        asUsrId: carol,
+        acceptingIdentifier: "x@y",
+      }),
     ).rejects.toThrow(InvitationNotPendingError);
   });
 

@@ -41,6 +41,8 @@ import {
   AlreadyTerminalError,
   DuplicateMembershipError,
   ForbiddenError,
+  IdentifierBindingRequiredError,
+  IdentifierMismatchError,
   InvitationExpiredError,
   InvitationNotPendingError,
   NotFoundError,
@@ -960,6 +962,18 @@ export class PostgresTenancyStore implements TenancyStore {
         throw new InvitationExpiredError(
           `Invitation ${input.invId} expired at ${inv.expires_at.toISOString()}`,
         );
+      }
+      // ADR 0009: existing-user accept MUST supply a matching identifier.
+      if (input.asUsrId !== undefined && input.asUsrId !== null) {
+        if (
+          input.acceptingIdentifier === undefined ||
+          input.acceptingIdentifier === null
+        ) {
+          throw new IdentifierBindingRequiredError();
+        }
+        if (input.acceptingIdentifier !== inv.identifier) {
+          throw new IdentifierMismatchError(input.acceptingIdentifier, inv.identifier);
+        }
       }
       const usrUuid = input.asUsrId ? wireToUuid(input.asUsrId) : decode(generate("usr")).uuid;
       // Duplicate-membership check (partial index would also catch this; check explicitly for clean error).
