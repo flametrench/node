@@ -30,7 +30,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import { decode, encode, generate } from "@flametrench/ids";
+import { decode, decodeAny, encode, generate } from "@flametrench/ids";
 import type { Pool, PoolClient } from "pg";
 
 import {
@@ -100,6 +100,27 @@ function wireToUuid(wireId: string): string {
   return decode(wireId).uuid;
 }
 
+/**
+ * Decode an `object_id` to a Postgres-bindable UUID string.
+ *
+ * `object_type` is application-defined (per spec/docs/authorization.md
+ * and ADR 0001), so `object_id` may legitimately arrive as:
+ *   1. A wire-format ID with a non-registered prefix (e.g. `proj_<hex>`,
+ *      `file_<hex>`) — extract the UUID via `decodeAny` so app-defined
+ *      prefixes are accepted in addition to registered types.
+ *   2. A raw 32-character hex UUID — accept as-is; Postgres UUID parsing
+ *      handles both 32-hex and hyphenated forms.
+ *   3. A canonical hyphenated UUID — also accepted as-is.
+ *
+ * Closes spec#8.
+ */
+function objectIdToUuid(objectId: string): string {
+  if (/^[a-z]{2,6}_[0-9a-f]{32}$/.test(objectId)) {
+    return decodeAny(objectId).uuid;
+  }
+  return objectId;
+}
+
 export interface PostgresTupleStoreOptions {
   /** Override the clock for deterministic tests. */
   clock?: () => Date;
@@ -136,6 +157,7 @@ export class PostgresTupleStore implements TupleStore {
     }
     const id = decode(generate("tup")).uuid;
     const subjectUuid = wireToUuid(input.subjectId);
+    const objectUuid = objectIdToUuid(input.objectId);
     const createdByUuid = input.createdBy ? wireToUuid(input.createdBy) : null;
     const now = this.now();
     try {
@@ -149,7 +171,7 @@ export class PostgresTupleStore implements TupleStore {
           subjectUuid,
           input.relation,
           input.objectType,
-          input.objectId,
+          objectUuid,
           now,
           createdByUuid,
         ],
@@ -161,7 +183,7 @@ export class PostgresTupleStore implements TupleStore {
           `SELECT id FROM tup
            WHERE subject_type = $1 AND subject_id = $2 AND relation = $3
              AND object_type = $4 AND object_id = $5`,
-          [input.subjectType, subjectUuid, input.relation, input.objectType, input.objectId],
+          [input.subjectType, subjectUuid, input.relation, input.objectType, objectUuid],
         );
         if (rows.length > 0) {
           throw new DuplicateTupleError(
@@ -222,7 +244,7 @@ export class PostgresTupleStore implements TupleStore {
         subjectUuid,
         input.relations,
         input.objectType,
-        input.objectId,
+        objectIdToUuid(input.objectId),
       ],
     );
     const allowed = rows.length > 0;
@@ -273,7 +295,7 @@ export class PostgresTupleStore implements TupleStore {
   ): Promise<Page<Tuple>> {
     const limit = Math.min(options.limit ?? 50, 200);
     const cursor = options.cursor;
-    const params: unknown[] = [objectType, objectId];
+    const params: unknown[] = [objectType, objectIdToUuid(objectId)];
     let where = "object_type = $1 AND object_id = $2";
     if (relation !== undefined) {
       params.push(relation);
@@ -453,7 +475,7 @@ export class PostgresShareStore implements ShareStore {
         id,
         tokenHash,
         input.objectType,
-        input.objectId,
+        objectIdToUuid(input.objectId),
         input.relation,
         createdByUuid,
         expiresAt,
@@ -541,7 +563,7 @@ export class PostgresShareStore implements ShareStore {
   ): Promise<SharesPage> {
     const limit = Math.min(options.limit ?? 50, 200);
     const cursor = options.cursor;
-    const params: unknown[] = [objectType, objectId];
+    const params: unknown[] = [objectType, objectIdToUuid(objectId)];
     let where = "object_type = $1 AND object_id = $2";
     if (cursor !== undefined) {
       params.push(wireToUuid(cursor));

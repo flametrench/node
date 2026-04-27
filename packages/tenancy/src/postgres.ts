@@ -34,7 +34,7 @@
  * and converts to/from UUIDs internally.
  */
 
-import { decode, encode, generate } from "@flametrench/ids";
+import { decode, decodeAny, encode, generate } from "@flametrench/ids";
 import type { Pool, PoolClient } from "pg";
 
 import {
@@ -115,6 +115,19 @@ const ADMIN_RANK: Record<string, number> = {
 /** Strip the `type_` prefix and rehydrate canonical hyphenated UUID. */
 function wireToUuid(wireId: string): string {
   return decode(wireId).uuid;
+}
+
+/**
+ * Decode an `object_id` to a Postgres-bindable UUID string. See
+ * authz/postgres.ts:objectIdToUuid for rationale (spec#8) — `object_type`
+ * is application-defined, so wire-format prefixed IDs with non-registered
+ * prefixes (e.g. `proj_<hex>`) may legitimately arrive here.
+ */
+function objectIdToUuid(objectId: string): string {
+  if (/^[a-z]{2,6}_[0-9a-f]{32}$/.test(objectId)) {
+    return decodeAny(objectId).uuid;
+  }
+  return objectId;
 }
 
 function orgIdOf(uuid: string): OrgId {
@@ -1094,7 +1107,7 @@ export class PostgresTenancyStore implements TenancyStore {
         await c.query(
           `INSERT INTO tup (id, subject_type, subject_id, relation, object_type, object_id, created_at)
            VALUES ($1, 'usr', $2, $3, $4, $5, $6)`,
-          [ptTupUuid, usrUuid, relation, objectType, objectId, now],
+          [ptTupUuid, usrUuid, relation, objectType, objectIdToUuid(objectId), now],
         );
         materializedTuples.push({
           subjectType: "usr",
@@ -1186,7 +1199,7 @@ export class PostgresTenancyStore implements TenancyStore {
     objectId: string,
     relation?: string,
   ): Promise<Tuple[]> {
-    const params: unknown[] = [objectType, objectId];
+    const params: unknown[] = [objectType, objectIdToUuid(objectId)];
     const conditions = ["object_type = $1", "object_id = $2"];
     if (relation !== undefined) {
       params.push(relation);

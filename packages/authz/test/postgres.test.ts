@@ -346,6 +346,36 @@ describe.skipIf(!hasPostgres)("PostgresTupleStore", () => {
     const all = [...page1.data, ...page2.data];
     expect(new Set(all.map((t) => t.id)).size).toBe(5);
   });
+
+  // ───── spec#8: wire-format object_id with app-defined prefix ─────
+
+  it("accepts wire-format object_id with an app-defined prefix (proj_<32hex>)", async () => {
+    // ADR 0001 / spec/docs/authorization.md: object_type is application-
+    // defined. Adopters legitimately pass wire-format prefixed IDs
+    // (e.g. `proj_<32hex>`, `file_<32hex>`) at this boundary. Closes
+    // spec#8 — previously this raised a Postgres UUID parse error.
+    const wireProj = `proj_${newObjectId().replace(/-/g, "")}`;
+    const t = await store.createTuple({
+      subjectType: "usr",
+      subjectId: alice,
+      relation: "owner",
+      objectType: "proj",
+      objectId: wireProj,
+    });
+    expect(t.id).toMatch(/^tup_[0-9a-f]{32}$/);
+    // check() and listTuplesByObject() must accept the same wire-format
+    // value back through the read paths.
+    const result = await store.check({
+      subjectType: "usr",
+      subjectId: alice,
+      relation: "owner",
+      objectType: "proj",
+      objectId: wireProj,
+    });
+    expect(result.allowed).toBe(true);
+    const list = await store.listTuplesByObject("proj", wireProj);
+    expect(list.data).toHaveLength(1);
+  });
 });
 
 if (!hasPostgres) {
