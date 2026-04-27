@@ -26,6 +26,12 @@ importers:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.20.0
+      pg:
+        specifier: ^8.11.0
+        version: 8.20.0
       tsup:
         specifier: ^8.5.0
         version: 8.5.1(postcss@8.5.10)(typescript@5.9.3)
@@ -48,6 +54,12 @@ importers:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.20.0
+      pg:
+        specifier: ^8.11.0
+        version: 8.20.0
       tsup:
         specifier: ^8.5.0
         version: 8.5.1(postcss@8.5.10)(typescript@5.9.3)

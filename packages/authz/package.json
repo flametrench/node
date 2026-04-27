@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/authz",
-  "version": "0.2.0-rc.1",
+  "version": "0.2.0-rc.2",
   "description": "Authorization primitives for Flametrench: relational tuples and exact-match check(). Spec-conformant, no rewrite rules in v0.1.",
   "license": "Apache-2.0",
   "author": {
@@ -31,6 +31,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "import": "./dist/postgres.js"
     }
   },
   "files": [
@@ -44,8 +48,18 @@
   "dependencies": {
     "@flametrench/ids": "workspace:*"
   },
+  "peerDependencies": {
+    "pg": "^8.11.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "pg": "^8.11.0",
     "tsup": "^8.5.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"

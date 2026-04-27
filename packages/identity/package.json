@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/identity",
-  "version": "0.2.0-rc.3",
+  "version": "0.2.0-rc.4",
   "description": "Identity primitives for Flametrench: users, credentials (Argon2id-pinned passwords, passkeys, OIDC), and user-bound sessions with rotation-on-refresh.",
   "license": "Apache-2.0",
   "author": {
@@ -34,6 +34,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "import": "./dist/postgres.js"
     }
   },
   "files": [
@@ -48,8 +52,18 @@
     "@flametrench/ids": "workspace:*",
     "argon2": "^0.43.0"
   },
+  "peerDependencies": {
+    "pg": "^8.11.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "pg": "^8.11.0",
     "tsup": "^8.5.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
