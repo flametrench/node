@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   InvalidFormatError,
   InvalidShareTokenError,
+  PreconditionError,
   SHARE_MAX_TTL_SECONDS,
   ShareConsumedError,
   ShareExpiredError,
@@ -217,6 +218,51 @@ describe.skipIf(!hasPostgres)("PostgresShareStore", () => {
     await expect(store.getShare(generate("shr") as ShrId)).rejects.toThrow(
       ShareNotFoundError,
     );
+  });
+
+  // ─── ADR 0012: created_by must be an active user ───
+
+  it("rejects createShare when created_by user is suspended", async () => {
+    await pool.query("UPDATE usr SET status = 'suspended' WHERE id = $1", [
+      decode(alice).uuid,
+    ]);
+    await expect(
+      store.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: alice,
+        expiresInSeconds: 600,
+      }),
+    ).rejects.toThrow(PreconditionError);
+  });
+
+  it("rejects createShare when created_by user is revoked", async () => {
+    await pool.query("UPDATE usr SET status = 'revoked' WHERE id = $1", [
+      decode(alice).uuid,
+    ]);
+    await expect(
+      store.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: alice,
+        expiresInSeconds: 600,
+      }),
+    ).rejects.toThrow(PreconditionError);
+  });
+
+  it("rejects createShare when created_by user does not exist", async () => {
+    const ghost = generate("usr") as UsrId;
+    await expect(
+      store.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: ghost,
+        expiresInSeconds: 600,
+      }),
+    ).rejects.toThrow(PreconditionError);
   });
 
   // ─── Spec error precedence: consumed > expired ───

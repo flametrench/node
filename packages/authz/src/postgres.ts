@@ -38,6 +38,7 @@ import {
   EmptyRelationSetError,
   InvalidFormatError,
   InvalidShareTokenError,
+  PreconditionError,
   ShareConsumedError,
   ShareExpiredError,
   ShareNotFoundError,
@@ -418,6 +419,26 @@ export class PostgresShareStore implements ShareStore {
         "expires_in_seconds",
       );
     }
+    const createdByUuid = wireToUuid(input.createdBy);
+    // ADR 0012: createdBy MUST resolve to an active user. The DDL FK
+    // enforces existence; status is checked here at the SDK layer.
+    // Suspended/revoked users with leaked credentials cannot mint shares.
+    const userStatus = await this.pool.query<{ status: string }>(
+      `SELECT status FROM usr WHERE id = $1`,
+      [createdByUuid],
+    );
+    if (userStatus.rows.length === 0) {
+      throw new PreconditionError(
+        `createdBy ${input.createdBy} does not exist`,
+        "creator_not_found",
+      );
+    }
+    if (userStatus.rows[0]!.status !== "active") {
+      throw new PreconditionError(
+        `createdBy ${input.createdBy} is ${userStatus.rows[0]!.status}; only active users can mint shares`,
+        "creator_not_active",
+      );
+    }
     const id = decode(generate("shr")).uuid;
     const token = generateShareToken();
     const tokenHash = hashTokenBytes(token);
@@ -434,7 +455,7 @@ export class PostgresShareStore implements ShareStore {
         input.objectType,
         input.objectId,
         input.relation,
-        wireToUuid(input.createdBy),
+        createdByUuid,
         expiresAt,
         input.singleUse ?? false,
         now,

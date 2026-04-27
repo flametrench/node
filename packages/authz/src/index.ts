@@ -37,6 +37,7 @@ export {
   EvaluationLimitExceededError,
   InvalidFormatError,
   InvalidShareTokenError,
+  PreconditionError,
   ShareConsumedError,
   ShareExpiredError,
   ShareNotFoundError,

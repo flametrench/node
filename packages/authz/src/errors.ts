@@ -117,3 +117,25 @@ export class ShareNotFoundError extends AuthzError {
     this.name = "ShareNotFoundError";
   }
 }
+
+/**
+ * A precondition for the requested operation was not met.
+ *
+ * Used (initially) when share creation is attempted on behalf of a
+ * non-active user — `created_by` MUST resolve to a user whose
+ * `usr.status` is `'active'` per ADR 0012. The DDL FK enforces
+ * existence; the status check runs at the SDK layer because the
+ * `usr` table has no partial-active foreign key.
+ *
+ * Carries an additional `reason` token matching the convention used
+ * by `PreconditionError` in the identity and tenancy SDKs.
+ */
+export class PreconditionError extends AuthzError {
+  constructor(
+    message: string,
+    public readonly reason: string,
+  ) {
+    super(message, `precondition.${reason}`);
+    this.name = "PreconditionError";
+  }
+}
