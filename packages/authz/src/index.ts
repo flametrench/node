@@ -36,6 +36,11 @@ export {
   EmptyRelationSetError,
   EvaluationLimitExceededError,
   InvalidFormatError,
+  InvalidShareTokenError,
+  ShareConsumedError,
+  ShareExpiredError,
+  ShareNotFoundError,
+  ShareRevokedError,
   TupleNotFoundError,
 } from "./errors.js";
 
@@ -49,3 +54,20 @@ export {
   type ThisNode,
   type TupleToUserset,
 } from "./rewrite-rules.js";
+
+// v0.2 share tokens (ADR 0012).
+export type {
+  CreateShareInput,
+  CreateShareResult,
+  ListSharesOptions,
+  Share,
+  ShareStore,
+  SharesPage,
+  ShrId,
+  VerifiedShare,
+} from "./shares.js";
+export { SHARE_MAX_TTL_SECONDS } from "./shares.js";
+export {
+  InMemoryShareStore,
+  type InMemoryShareStoreOptions,
+} from "./in-memory-shares.js";

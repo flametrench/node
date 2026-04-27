@@ -70,3 +70,50 @@ export class EvaluationLimitExceededError extends AuthzError {
     this.name = "EvaluationLimitExceededError";
   }
 }
+
+// ─── v0.2 share-token errors (ADR 0012) ───
+
+/**
+ * Generic violation of `verifyShareToken` precondition: token doesn't match
+ * any row, or hash comparison failed. Deliberately conflated to avoid a
+ * timing oracle distinguishing "no such hash" from "hash collision but
+ * mismatch."
+ */
+export class InvalidShareTokenError extends AuthzError {
+  constructor(message: string = "Invalid share token") {
+    super(message, "invalid_share_token");
+    this.name = "InvalidShareTokenError";
+  }
+}
+
+/** The share's `expires_at` has passed. */
+export class ShareExpiredError extends AuthzError {
+  constructor(message: string = "Share has expired") {
+    super(message, "share_expired");
+    this.name = "ShareExpiredError";
+  }
+}
+
+/** The share has been explicitly revoked. */
+export class ShareRevokedError extends AuthzError {
+  constructor(message: string = "Share has been revoked") {
+    super(message, "share_revoked");
+    this.name = "ShareRevokedError";
+  }
+}
+
+/** A single-use share has already been consumed. */
+export class ShareConsumedError extends AuthzError {
+  constructor(message: string = "Share has already been consumed") {
+    super(message, "share_consumed");
+    this.name = "ShareConsumedError";
+  }
+}
+
+/** A share with the requested id does not exist. */
+export class ShareNotFoundError extends AuthzError {
+  constructor(message: string) {
+    super(message, "not_found");
+    this.name = "ShareNotFoundError";
+  }
+}

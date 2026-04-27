@@ -28,15 +28,33 @@
  *     with the `rules` option.
  */
 
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+
 import { decode, encode, generate } from "@flametrench/ids";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import {
   DuplicateTupleError,
   EmptyRelationSetError,
   InvalidFormatError,
+  InvalidShareTokenError,
+  ShareConsumedError,
+  ShareExpiredError,
+  ShareNotFoundError,
+  ShareRevokedError,
   TupleNotFoundError,
 } from "./errors.js";
+import {
+  SHARE_MAX_TTL_SECONDS,
+  type CreateShareInput,
+  type CreateShareResult,
+  type ListSharesOptions,
+  type Share,
+  type ShareStore,
+  type SharesPage,
+  type ShrId,
+  type VerifiedShare,
+} from "./shares.js";
 import type { TupleStore } from "./store.js";
 import {
   RELATION_NAME_PATTERN,
@@ -292,4 +310,233 @@ function isUniqueViolation(err: unknown): boolean {
     && err !== null
     && (err as { code?: string }).code === "23505"
   );
+}
+
+// ─── PostgresShareStore (ADR 0012) ──────────────────────────────────
+
+interface ShrRow {
+  id: string;
+  token_hash: Buffer;
+  object_type: string;
+  object_id: string;
+  relation: string;
+  created_by: string;
+  expires_at: Date;
+  single_use: boolean;
+  consumed_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+}
+
+const SHR_COLS =
+  "id, token_hash, object_type, object_id, relation, created_by, "
+  + "expires_at, single_use, consumed_at, revoked_at, created_at";
+
+function rowToShare(r: ShrRow): Share {
+  return {
+    id: encode("shr", r.id) as ShrId,
+    objectType: r.object_type,
+    objectId: r.object_id,
+    relation: r.relation,
+    createdBy: encode("usr", r.created_by) as UsrId,
+    expiresAt: r.expires_at,
+    singleUse: r.single_use,
+    consumedAt: r.consumed_at,
+    revokedAt: r.revoked_at,
+    createdAt: r.created_at,
+  };
+}
+
+function hashTokenBytes(token: string): Buffer {
+  return createHash("sha256").update(token).digest();
+}
+
+function generateShareToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+/**
+ * Postgres-backed ShareStore. Mirrors {@link InMemoryShareStore} byte-
+ * for-byte at the SDK boundary.
+ *
+ * Verification is one round-trip on the partial-unique `shr_token_hash_idx`
+ * (which excludes consumed + revoked rows). Single-use consumption uses
+ * `UPDATE ... WHERE consumed_at IS NULL RETURNING ...` so concurrent
+ * verifies of a single-use token race-correctly to exactly one success.
+ */
+export class PostgresShareStore implements ShareStore {
+  private readonly clock: () => Date;
+
+  constructor(
+    private readonly pool: Pool,
+    options: { clock?: () => Date } = {},
+  ) {
+    this.clock = options.clock ?? (() => new Date());
+  }
+
+  private now(): Date {
+    return this.clock();
+  }
+
+  private async tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const out = await fn(c);
+      await c.query("COMMIT");
+      return out;
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+
+  async createShare(input: CreateShareInput): Promise<CreateShareResult> {
+    if (!RELATION_NAME_PATTERN.test(input.relation)) {
+      throw new InvalidFormatError(
+        `relation '${input.relation}' must match ${RELATION_NAME_PATTERN}`,
+        "relation",
+      );
+    }
+    if (!TYPE_PREFIX_PATTERN.test(input.objectType)) {
+      throw new InvalidFormatError(
+        `objectType '${input.objectType}' must match ${TYPE_PREFIX_PATTERN}`,
+        "object_type",
+      );
+    }
+    if (input.expiresInSeconds <= 0) {
+      throw new InvalidFormatError(
+        `expiresInSeconds must be positive, got ${input.expiresInSeconds}`,
+        "expires_in_seconds",
+      );
+    }
+    if (input.expiresInSeconds > SHARE_MAX_TTL_SECONDS) {
+      throw new InvalidFormatError(
+        `expiresInSeconds exceeds the spec ceiling of ${SHARE_MAX_TTL_SECONDS} (365 days)`,
+        "expires_in_seconds",
+      );
+    }
+    const id = decode(generate("shr")).uuid;
+    const token = generateShareToken();
+    const tokenHash = hashTokenBytes(token);
+    const now = this.now();
+    const expiresAt = new Date(now.getTime() + input.expiresInSeconds * 1000);
+    const { rows } = await this.pool.query<ShrRow>(
+      `INSERT INTO shr (id, token_hash, object_type, object_id, relation,
+                        created_by, expires_at, single_use, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING ${SHR_COLS}`,
+      [
+        id,
+        tokenHash,
+        input.objectType,
+        input.objectId,
+        input.relation,
+        wireToUuid(input.createdBy),
+        expiresAt,
+        input.singleUse ?? false,
+        now,
+      ],
+    );
+    return { share: rowToShare(rows[0]!), token };
+  }
+
+  async getShare(id: ShrId): Promise<Share> {
+    const { rows } = await this.pool.query<ShrRow>(
+      `SELECT ${SHR_COLS} FROM shr WHERE id = $1`,
+      [wireToUuid(id)],
+    );
+    if (rows.length === 0) {
+      throw new ShareNotFoundError(`Share ${id} not found`);
+    }
+    return rowToShare(rows[0]!);
+  }
+
+  async verifyShareToken(token: string): Promise<VerifiedShare> {
+    const inputHash = hashTokenBytes(token);
+    return this.tx(async (c) => {
+      // Lookup is done WITHOUT the partial-unique-index filter so we can
+      // distinguish revoked / consumed / expired and return the right
+      // error class. The index still serves the hot path; we add the
+      // explicit row-state checks for clean error semantics.
+      const sel = await c.query<ShrRow>(
+        `SELECT ${SHR_COLS} FROM shr WHERE token_hash = $1
+         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+        [inputHash],
+      );
+      if (sel.rows.length === 0) throw new InvalidShareTokenError();
+      const r = sel.rows[0]!;
+      // Defense-in-depth: timing-safe compare on the BYTEA column.
+      if (!timingSafeEqual(inputHash, r.token_hash)) {
+        throw new InvalidShareTokenError();
+      }
+      // Spec error precedence: revoked > consumed > expired.
+      if (r.revoked_at !== null) throw new ShareRevokedError();
+      if (r.single_use && r.consumed_at !== null) throw new ShareConsumedError();
+      const now = this.now();
+      if (now.getTime() >= r.expires_at.getTime()) {
+        throw new ShareExpiredError();
+      }
+      if (r.single_use) {
+        // Atomic consume — concurrent verifies race here. The
+        // `WHERE consumed_at IS NULL` is what makes the second loser.
+        const upd = await c.query<{ id: string }>(
+          `UPDATE shr SET consumed_at = $2
+           WHERE id = $1 AND consumed_at IS NULL
+           RETURNING id`,
+          [r.id, now],
+        );
+        if (upd.rows.length === 0) throw new ShareConsumedError();
+      }
+      return {
+        shareId: encode("shr", r.id) as ShrId,
+        objectType: r.object_type,
+        objectId: r.object_id,
+        relation: r.relation,
+      };
+    });
+  }
+
+  async revokeShare(id: ShrId): Promise<Share> {
+    const uuid = wireToUuid(id);
+    const { rows } = await this.pool.query<ShrRow>(
+      `UPDATE shr SET revoked_at = COALESCE(revoked_at, $2)
+       WHERE id = $1
+       RETURNING ${SHR_COLS}`,
+      [uuid, this.now()],
+    );
+    if (rows.length === 0) {
+      throw new ShareNotFoundError(`Share ${id} not found`);
+    }
+    return rowToShare(rows[0]!);
+  }
+
+  async listSharesForObject(
+    objectType: string,
+    objectId: string,
+    options: ListSharesOptions = {},
+  ): Promise<SharesPage> {
+    const limit = Math.min(options.limit ?? 50, 200);
+    const cursor = options.cursor;
+    const params: unknown[] = [objectType, objectId];
+    let where = "object_type = $1 AND object_id = $2";
+    if (cursor !== undefined) {
+      params.push(wireToUuid(cursor));
+      where += ` AND id > $${params.length}`;
+    }
+    params.push(limit + 1);
+    const limitParam = params.length;
+    const { rows } = await this.pool.query<ShrRow>(
+      `SELECT ${SHR_COLS} FROM shr
+       WHERE ${where}
+       ORDER BY id LIMIT $${limitParam}`,
+      params,
+    );
+    const data = rows.slice(0, limit).map(rowToShare);
+    const nextCursor =
+      rows.length > limit ? (data[data.length - 1]?.id ?? null) : null;
+    return { data, nextCursor };
+  }
 }
