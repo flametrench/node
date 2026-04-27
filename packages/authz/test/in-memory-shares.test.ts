@@ -253,6 +253,77 @@ describe("InMemoryShareStore", () => {
 
   // ─── listSharesForObject ───
 
+  // ─── Spec error precedence: consumed > expired ───
+
+  it("consumed + expired share raises ShareConsumedError (consumed wins)", async () => {
+    let now = new Date("2026-04-27T00:00:00Z");
+    const clock = () => now;
+    const s = new InMemoryShareStore({ clock });
+    const { token } = await s.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 60,
+      singleUse: true,
+    });
+    await s.verifyShareToken(token); // consumes
+    now = new Date(now.getTime() + 61 * 1000); // now also expired
+    await expect(s.verifyShareToken(token)).rejects.toThrow(
+      ShareConsumedError,
+    );
+  });
+
+  // ─── createdBy round-trip ───
+
+  it("createdBy round-trips through getShare", async () => {
+    const { share } = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+    });
+    const fetched = await store.getShare(share.id);
+    expect(fetched.createdBy).toBe(alice);
+    expect(fetched.createdBy).toMatch(/^usr_/);
+  });
+
+  // ─── listSharesForObject returns shares in every state ───
+
+  it("listSharesForObject returns active, revoked, and consumed shares", async () => {
+    const active = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+    });
+    const revoked = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+    });
+    const consumed = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+      singleUse: true,
+    });
+    await store.revokeShare(revoked.share.id);
+    await store.verifyShareToken(consumed.token);
+    const page = await store.listSharesForObject("proj", project42);
+    const ids = new Set(page.data.map((s) => s.id));
+    expect(ids.has(active.share.id)).toBe(true);
+    expect(ids.has(revoked.share.id)).toBe(true);
+    expect(ids.has(consumed.share.id)).toBe(true);
+    expect(page.data).toHaveLength(3);
+  });
+
   it("listSharesForObject filters by object and paginates", async () => {
     const objects = [project42, project42, generate("usr").slice(4), project42];
     for (const o of objects) {
