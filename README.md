@@ -1,5 +1,7 @@
 # Flametrench Node SDK
 
+[![CI](https://github.com/flametrench/node/actions/workflows/ci.yml/badge.svg)](https://github.com/flametrench/node/actions/workflows/ci.yml)
+
 Node SDK for [Flametrench](https://github.com/flametrench/spec). Monorepo of `@flametrench/*` packages.
 
 ## Packages
