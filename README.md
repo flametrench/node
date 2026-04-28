@@ -4,14 +4,14 @@ Node SDK for [Flametrench](https://github.com/flametrench/spec). Monorepo of `@f
 
 ## Packages
 
-- [`@flametrench/ids`](./packages/ids) — Prefixed wire-format IDs for Flametrench. Stable.
-- [`@flametrench/tenancy`](./packages/tenancy) — Organizations, memberships, and invitations. In-memory + Postgres-backed stores (via `@flametrench/tenancy/postgres`).
-- [`@flametrench/authz`](./packages/authz) — Relational tuples and exact-match `check()`. No rewrite rules in v0.1 per the spec.
-- [`@flametrench/identity`](./packages/identity) — Users, credentials (Argon2id-pinned password + passkey + OIDC), and user-bound sessions with rotation on refresh.
-- [`@flametrench/nextjs`](./packages/nextjs) — Next.js 15 App Router adapter: cookie-backed session helpers, password sign-in, route handlers for `/api/auth/*`.
-- [`@flametrench/server`](./packages/server) — Fastify 5 reference HTTP server exposing the v0.1 OpenAPI surface, backed by pluggable stores. Drop-in deployable starting point.
+- [`@flametrench/ids`](./packages/ids) — Prefixed wire-format IDs for Flametrench. Stable. _v0.2.0-rc.2_
+- [`@flametrench/identity`](./packages/identity) — Users, credentials (Argon2id-pinned password + passkey + OIDC), user-bound sessions with rotation on refresh, and v0.2 multi-factor authentication (TOTP + WebAuthn). In-memory + Postgres-backed stores. _v0.2.0-rc.4_
+- [`@flametrench/tenancy`](./packages/tenancy) — Organizations, memberships, and invitations. In-memory + Postgres-backed stores. _v0.2.0-rc.5_
+- [`@flametrench/authz`](./packages/authz) — Relational tuples and exact-match `check()` (v0.2 adds opt-in rewrite rules and time-bounded share tokens). In-memory + Postgres-backed stores. _v0.2.0-rc.4_
+- [`@flametrench/nextjs`](./packages/nextjs) — Next.js 15 App Router adapter: cookie-backed session helpers, password sign-in, route handlers for `/api/auth/*`. _v0.0.1_
+- [`@flametrench/server`](./packages/server) — Fastify 5 reference HTTP server exposing the v0.1 OpenAPI surface, backed by pluggable stores. Drop-in deployable starting point. _v0.0.1_
 
-More packages will land as the v0.1 specification stabilizes (Postgres stores for authz + identity, more framework adapters).
+More framework adapters and platform-breadth primitives will follow once v0.2 final ships.
 
 ## Development
 

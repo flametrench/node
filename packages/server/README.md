@@ -1,8 +1,8 @@
 # @flametrench/server
 
-Reference HTTP server for [Flametrench](https://flametrench.dev) v0.1. A Fastify 5 app exposing the v0.1 OpenAPI surface, backed by pluggable stores (`@flametrench/identity`, `@flametrench/tenancy`, `@flametrench/authz`).
+Reference HTTP server for [Flametrench](https://flametrench.dev). A Fastify 5 app exposing the OpenAPI surface, backed by pluggable stores (`@flametrench/identity`, `@flametrench/tenancy`, `@flametrench/authz`).
 
-**Status:** v0.0.1 — early. Drop-in starting point for a Flametrench backend. For production deployments, swap the in-memory stores for Postgres-backed implementations (`@flametrench/tenancy/postgres`; identity/authz Postgres adapters land in v0.0.2).
+**Status:** v0.0.1 — early. Drop-in starting point for a Flametrench backend. For production deployments, swap the in-memory stores for the Postgres-backed implementations exported by each SDK package (`@flametrench/identity/postgres`, `@flametrench/tenancy/postgres`, `@flametrench/authz/postgres`).
 
 ## Install
 

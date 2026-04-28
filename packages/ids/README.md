@@ -36,17 +36,19 @@ Requires Node 20 or newer. ESM-only (no CommonJS build).
 
 ## Registered type prefixes
 
-The v0.1 specification reserves the following prefixes:
+The specification reserves the following prefixes:
 
-| Prefix | Resource            |
-| ------ | ------------------- |
-| `usr`  | User                |
-| `org`  | Organization        |
-| `mem`  | Membership          |
-| `inv`  | Invitation          |
-| `ses`  | Session             |
-| `cred` | Credential          |
-| `tup`  | Authorization tuple |
+| Prefix | Resource            | Spec version |
+| ------ | ------------------- | ------------ |
+| `usr`  | User                | v0.1         |
+| `org`  | Organization        | v0.1         |
+| `mem`  | Membership          | v0.1         |
+| `inv`  | Invitation          | v0.1         |
+| `ses`  | Session             | v0.1         |
+| `cred` | Credential          | v0.1         |
+| `tup`  | Authorization tuple | v0.1         |
+| `mfa`  | MFA factor          | v0.2         |
+| `shr`  | Share token         | v0.2         |
 
 Implementations must not invent prefixes outside the specification. New prefixes are added through the specification's RFC process.
 

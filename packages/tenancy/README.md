@@ -2,7 +2,7 @@
 
 Tenancy primitives for [Flametrench](https://flametrench.dev): organizations, memberships, and invitations. Spec-conformant revoke-and-re-add lifecycle, atomic invitation acceptance, sole-owner protection, and an `mem_`/`tup_` duality that cannot drift.
 
-**Status:** v0.0.1 — early draft. API subject to change before the v0.1.0 release alongside `@flametrench/ids@0.1.0`. The in-memory store is reference / test infrastructure; a Postgres-backed store is planned for a future release.
+**Status:** v0.2.0-rc.5 (release candidate). Both the in-memory reference store and the production-ready `PostgresTenancyStore` ship in this package; the latter mirrors the in-memory semantics byte-for-byte at the SDK boundary with multi-statement atomicity for `createOrg`, `changeRole` revoke-and-re-add, `acceptInvitation` with pre-tuples, and `transferOwnership`.
 
 ## Install
 

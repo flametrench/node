@@ -1,8 +1,8 @@
 # @flametrench/authz
 
-Authorization primitives for [Flametrench](https://flametrench.dev): relational tuples and exact-match `check()`. Spec-conformant to v0.1 — **no rewrite rules, no derivation, no group expansion**. That simplicity is the load-bearing decision from [ADR 0001](https://github.com/flametrench/spec/blob/main/decisions/0001-authorization-model.md); upgrade paths for those features are reserved for v0.2+.
+Authorization primitives for [Flametrench](https://flametrench.dev): relational tuples and exact-match `check()`. Spec-conformant — exact-match remains the default, with **no implicit rewriting** at the API boundary ([ADR 0001](https://github.com/flametrench/spec/blob/main/decisions/0001-authorization-model.md)). v0.2 adds opt-in rewrite rules ([ADR 0007](https://github.com/flametrench/spec/blob/main/decisions/0007-rewrite-rules.md)) — `computed_userset` (role implication) and `tuple_to_userset` (parent-child inheritance) — for adopters who want hierarchies. Group expansion remains deferred.
 
-**Status:** v0.0.1 — early draft alongside `@flametrench/tenancy`.
+**Status:** v0.2.0-rc.4 (release candidate). Includes `ShareStore` ([ADR 0012](https://github.com/flametrench/spec/blob/main/decisions/0012-share-tokens.md)) and Postgres-backed adapters (`PostgresTupleStore`, `PostgresShareStore`).
 
 ## Install
 

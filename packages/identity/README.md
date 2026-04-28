@@ -1,8 +1,8 @@
 # @flametrench/identity
 
-Identity primitives for [Flametrench](https://flametrench.dev): users, credentials (password, passkey, OIDC), and user-bound sessions. Spec-conformant to v0.1 — Argon2id-pinned password hashing, revoke-and-re-add credential rotation, rotation-on-refresh sessions, and comprehensive cascade semantics.
+Identity primitives for [Flametrench](https://flametrench.dev): users, credentials (password, passkey, OIDC), and user-bound sessions. Spec-conformant — Argon2id-pinned password hashing, revoke-and-re-add credential rotation, rotation-on-refresh sessions, and comprehensive cascade semantics. v0.2 adds first-class multi-factor authentication ([ADR 0008](https://github.com/flametrench/spec/blob/main/decisions/0008-mfa.md), [ADR 0010](https://github.com/flametrench/spec/blob/main/decisions/0010-webauthn-rs256-eddsa.md)) — TOTP (RFC 6238), recovery codes, and WebAuthn assertion verification across ES256 / RS256 / EdDSA.
 
-**Status:** v0.0.1 — early draft alongside `@flametrench/ids`, `@flametrench/tenancy`, and `@flametrench/authz`.
+**Status:** v0.2.0-rc.4 (release candidate). Includes the production-ready `PostgresIdentityStore` alongside the in-memory reference store.
 
 ## Install
 
@@ -43,12 +43,12 @@ const live = await store.verifySessionToken(token);
 console.log(live.id === session.id); // true
 ```
 
-## Credential types in v0.1
+## Credential types
 
 | Type | Sensitive-at-rest material | Verification |
 |---|---|---|
 | `password` | Argon2id PHC hash | Handled by this package via `verifyPassword()`. Parameters are pinned at or above the spec floor: `m=19456, t=2, p=1`. |
-| `passkey` | WebAuthn public key bytes | Stored but **not verified by this package** in v0.0.1. Applications perform WebAuthn assertion verification and update `signCount` via a future rotation API. A first-class WebAuthn verifier is planned for v0.2+. |
+| `passkey` | WebAuthn public key bytes | Stored as a `cred_` for password-less login; verified at sign-in by the caller (or via the v0.2 `mfa_` factor type when the same passkey is bound as a second factor). |
 | `oidc` | None per-user (issuer + subject claim) | Verification of the ID token is the caller's responsibility; this package stores the issuer/subject pair so `findCredentialByIdentifier` returns the correct `usr_id` after the caller has verified. |
 
 ## API shape
@@ -121,12 +121,16 @@ pnpm -r build
 pnpm -r test        # includes @flametrench/identity's 30 unit tests
 ```
 
+## Shipped in v0.2 RC
+
+- `PostgresIdentityStore` at `@flametrench/identity/postgres` — production-ready, mirrors the in-memory reference store byte-for-byte at the SDK boundary.
+- First-class multi-factor authentication ([ADR 0008](https://github.com/flametrench/spec/blob/main/decisions/0008-mfa.md)): TOTP (RFC 6238), recovery codes, and WebAuthn assertion verification.
+- WebAuthn algorithm coverage extended to ES256 + RS256 + EdDSA ([ADR 0010](https://github.com/flametrench/spec/blob/main/decisions/0010-webauthn-rs256-eddsa.md)).
+
 ## Not yet shipped
 
-- Postgres-backed `IdentityStore`. The base package is backend-agnostic; a Postgres implementation lands at `@flametrench/identity/postgres` in a future release, matching the pattern already established by `@flametrench/tenancy/postgres`.
-- First-class WebAuthn verification for passkey credentials.
-- First-class OIDC issuer metadata discovery and ID-token verification.
-- Multi-factor authentication as a first-class primitive (MFA is deferred to v0.2+ per ADR 0004; applications can layer it on today by chaining multiple `verifyPassword` / future `verifyPasskey` / `verifyOidc` calls before `createSession`).
+- First-class OIDC issuer metadata discovery and ID-token verification (caller still verifies the ID token; this package stores the issuer/subject pair).
+- Magic-link and SAML credential types — deferred to v0.3+.
 
 ## License
 
