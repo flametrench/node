@@ -175,6 +175,56 @@ describe("InMemoryIdentityStore", () => {
       ).rejects.toThrow(InvalidCredentialError);
     });
 
+    // ─── ADR 0008: usr_mfa_policy gate on verifyPassword ───
+
+    it("verifyPassword: mfaRequired=false when no policy set", async () => {
+      const u = await store.createUser();
+      await store.createCredential({
+        usrId: u.id, type: "password", identifier: "a@x", password: "pw",
+      });
+      const r = await store.verifyPassword({
+        type: "password", identifier: "a@x", password: "pw",
+      });
+      expect(r.mfaRequired).toBe(false);
+    });
+
+    it("verifyPassword: mfaRequired=true when policy required and no grace", async () => {
+      const u = await store.createUser();
+      await store.createCredential({
+        usrId: u.id, type: "password", identifier: "a@x", password: "pw",
+      });
+      await store.setMfaPolicy({ usrId: u.id, required: true, graceUntil: null });
+      const r = await store.verifyPassword({
+        type: "password", identifier: "a@x", password: "pw",
+      });
+      expect(r.mfaRequired).toBe(true);
+    });
+
+    it("verifyPassword: mfaRequired=false during grace window", async () => {
+      const u = await store.createUser();
+      await store.createCredential({
+        usrId: u.id, type: "password", identifier: "a@x", password: "pw",
+      });
+      const future = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+      await store.setMfaPolicy({ usrId: u.id, required: true, graceUntil: future });
+      const r = await store.verifyPassword({
+        type: "password", identifier: "a@x", password: "pw",
+      });
+      expect(r.mfaRequired).toBe(false);
+    });
+
+    it("verifyPassword: mfaRequired=false when policy required=false", async () => {
+      const u = await store.createUser();
+      await store.createCredential({
+        usrId: u.id, type: "password", identifier: "a@x", password: "pw",
+      });
+      await store.setMfaPolicy({ usrId: u.id, required: false, graceUntil: null });
+      const r = await store.verifyPassword({
+        type: "password", identifier: "a@x", password: "pw",
+      });
+      expect(r.mfaRequired).toBe(false);
+    });
+
     it("rotateCredential revokes old, inserts new with replaces chain, terminates sessions", async () => {
       const u = await store.createUser();
       const oldCred = await store.createCredential({

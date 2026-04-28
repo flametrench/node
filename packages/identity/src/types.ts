@@ -158,6 +158,14 @@ export interface VerifyPasswordInput {
 export interface VerifiedCredentialResult {
   usrId: UsrId;
   credId: CredId;
+  /**
+   * `true` when `usr_mfa_policy.required` is true AND the grace window
+   * has elapsed (or was never set). Applications MUST call `verifyMfa`
+   * before `createSession` when this is true. Defaults to `false` so
+   * adopters who never enable a policy see no behavioral change.
+   * (ADR 0008.)
+   */
+  mfaRequired: boolean;
 }
 
 export interface FindCredentialInput {

@@ -530,7 +530,15 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (!ok) {
       throw new InvalidCredentialError(`Invalid credential`);
     }
-    return { usrId: cred.usrId, credId: cred.id };
+    // ADR 0008: surface usr_mfa_policy state.
+    const policy = this.mfaPolicies.get(cred.usrId);
+    let mfaRequired = false;
+    if (policy?.required) {
+      if (policy.graceUntil === null || policy.graceUntil <= this.now()) {
+        mfaRequired = true;
+      }
+    }
+    return { usrId: cred.usrId, credId: cred.id, mfaRequired };
   }
 
   // ─── Sessions ───

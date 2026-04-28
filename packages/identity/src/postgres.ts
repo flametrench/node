@@ -757,9 +757,23 @@ export class PostgresIdentityStore implements IdentityStore {
     if (!ok) {
       throw new InvalidCredentialError(`Invalid credential`);
     }
+    // ADR 0008: surface usr_mfa_policy state. Apps MUST gate
+    // createSession on mfaRequired by calling verifyMfa first when true.
+    const policyRes = await this.pool.query<{ required: boolean; grace_until: Date | null }>(
+      `SELECT required, grace_until FROM usr_mfa_policy WHERE usr_id = $1`,
+      [cred.usr_id],
+    );
+    let mfaRequired = false;
+    if (policyRes.rows.length > 0 && policyRes.rows[0]!.required) {
+      const grace = policyRes.rows[0]!.grace_until;
+      if (grace === null || grace <= this.now()) {
+        mfaRequired = true;
+      }
+    }
     return {
       usrId: encode("usr", cred.usr_id) as UsrId,
       credId: encode("cred", cred.id) as CredId,
+      mfaRequired,
     };
   }
 
