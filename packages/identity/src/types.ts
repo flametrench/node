@@ -44,6 +44,21 @@ export interface UpdateUserInput {
   displayName?: string | null;
 }
 
+/**
+ * Options for {@link IdentityStore.listUsers}. Per ADR 0015. Adopters MUST
+ * gate the call site (sysadmin route or equivalent); the SDK does not
+ * enforce authorization.
+ */
+export interface ListUsersOptions {
+  cursor?: string;
+  /** Page size; clamped to [1, 200]. Default 50. */
+  limit?: number;
+  /** Case-insensitive substring against active credential identifiers. */
+  query?: string;
+  /** Filter by user status. */
+  status?: Status;
+}
+
 // ─── Credentials (discriminated union on `type`) ───
 
 export interface PasswordCredential {

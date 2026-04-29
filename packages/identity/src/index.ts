@@ -21,6 +21,7 @@ export type {
   CredId,
   FindCredentialInput,
   ListOptions,
+  ListUsersOptions,
   OidcCredential,
   Page,
   PasskeyCredential,

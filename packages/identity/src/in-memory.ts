@@ -55,6 +55,7 @@ import {
   type CredentialType,
   type FindCredentialInput,
   type ListOptions,
+  type ListUsersOptions,
   type Page,
   type PasskeyCredential,
   type PasswordCredential,
@@ -238,6 +239,35 @@ export class InMemoryIdentityStore implements IdentityStore {
     const updated: User = { ...u, displayName: newDisplayName, updatedAt: this.now() };
     this.users.set(input.usrId, updated);
     return updated;
+  }
+
+  async listUsers(options?: ListUsersOptions): Promise<Page<User>> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+    const status = options?.status;
+    const needle = options?.query?.toLowerCase() ?? null;
+    const all = [...this.users.values()]
+      .filter((u) => status === undefined || u.status === status)
+      .filter((u) => {
+        if (needle === null) return true;
+        for (const cred of this.credentials.values()) {
+          if (cred.usrId !== u.id) continue;
+          if (cred.status !== "active") continue;
+          if (cred.identifier.toLowerCase().includes(needle)) return true;
+        }
+        return false;
+      })
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    let startIdx = 0;
+    if (options?.cursor !== undefined) {
+      startIdx = all.findIndex((u) => u.id > options.cursor!);
+      if (startIdx === -1) startIdx = all.length;
+    }
+    const slice = all.slice(startIdx, startIdx + limit);
+    const nextCursor =
+      startIdx + limit < all.length && slice.length > 0
+        ? slice[slice.length - 1]!.id
+        : null;
+    return { data: slice, nextCursor };
   }
 
   async suspendUser(usrId: UsrId): Promise<User> {

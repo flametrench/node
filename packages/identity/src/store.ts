@@ -21,6 +21,7 @@ import type {
   CredId,
   FindCredentialInput,
   ListOptions,
+  ListUsersOptions,
   Page,
   RotateCredentialInput,
   SesId,
@@ -54,6 +55,12 @@ export interface IdentityStore {
    * be updated; revoked users raise AlreadyTerminalError.
    */
   updateUser(input: UpdateUserInput): Promise<User>;
+  /**
+   * Paginated user enumeration per ADR 0015. Cursor + ordering match
+   * `listMembers`. Adopters MUST gate the call site (sysadmin or equivalent);
+   * the SDK does not enforce authorization.
+   */
+  listUsers(options?: ListUsersOptions): Promise<Page<User>>;
   suspendUser(usrId: UsrId): Promise<User>;
   reinstateUser(usrId: UsrId): Promise<User>;
   revokeUser(usrId: UsrId): Promise<User>;

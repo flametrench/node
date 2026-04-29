@@ -86,6 +86,7 @@ import {
   type Credential,
   type FindCredentialInput,
   type ListOptions,
+  type ListUsersOptions,
   type Page,
   type RotateCredentialInput,
   type SesId,
@@ -403,6 +404,42 @@ export class PostgresIdentityStore implements IdentityStore {
       );
       return rowToUser(rows[0]!);
     });
+  }
+
+  async listUsers(options?: ListUsersOptions): Promise<Page<User>> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+    const params: unknown[] = [];
+    let sql =
+      `SELECT id, status, display_name, created_at, updated_at FROM usr WHERE 1=1`;
+    if (options?.cursor !== undefined) {
+      params.push(wireToUuid(options.cursor as UsrId));
+      sql += ` AND id > $${params.length}`;
+    }
+    if (options?.status !== undefined) {
+      params.push(options.status);
+      sql += ` AND status = $${params.length}`;
+    }
+    if (options?.query !== undefined) {
+      params.push(
+        "%" +
+          options.query.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") +
+          "%",
+      );
+      sql += ` AND EXISTS (
+        SELECT 1 FROM cred
+        WHERE cred.usr_id = usr.id
+          AND cred.status = 'active'
+          AND cred.identifier ILIKE $${params.length}
+      )`;
+    }
+    params.push(limit + 1);
+    sql += ` ORDER BY id LIMIT $${params.length}`;
+    const { rows } = await this.pool.query<UsrRow>(sql, params);
+    const slice = rows.slice(0, limit);
+    const data = slice.map(rowToUser);
+    const nextCursor =
+      rows.length > limit && data.length > 0 ? data[data.length - 1]!.id : null;
+    return { data, nextCursor };
   }
 
   async suspendUser(usrId: UsrId): Promise<User> {

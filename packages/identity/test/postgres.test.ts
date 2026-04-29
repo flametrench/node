@@ -99,6 +99,88 @@ describe.skipIf(!hasPostgres)("PostgresIdentityStore", () => {
     await expect(store.revokeUser(user.id)).rejects.toThrow(AlreadyTerminalError);
   });
 
+  // ───── listUsers (ADR 0015) ─────
+
+  it("listUsers returns all users in id ASC order", async () => {
+    const a = await store.createUser();
+    const b = await store.createUser();
+    const c = await store.createUser();
+    const page = await store.listUsers();
+    expect(page.data.map((u) => u.id)).toEqual([a.id, b.id, c.id]);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("listUsers status filter excludes other states", async () => {
+    const active = await store.createUser();
+    const suspended = await store.createUser();
+    await store.suspendUser(suspended.id);
+    const page = await store.listUsers({ status: "active" });
+    expect(page.data.map((u) => u.id)).toEqual([active.id]);
+  });
+
+  it("listUsers query is case-insensitive substring against active credential identifiers", async () => {
+    const alice = await store.createUser();
+    await store.createCredential({
+      usrId: alice.id,
+      type: "password",
+      identifier: "alice@example.com",
+      password: "long-enough-password",
+    });
+    const bob = await store.createUser();
+    await store.createCredential({
+      usrId: bob.id,
+      type: "password",
+      identifier: "bob@example.com",
+      password: "long-enough-password",
+    });
+    const carol = await store.createUser();
+    await store.createCredential({
+      usrId: carol.id,
+      type: "password",
+      identifier: "carol@other.test",
+      password: "long-enough-password",
+    });
+    const page = await store.listUsers({ query: "EXAMPLE" });
+    expect(new Set(page.data.map((u) => u.id))).toEqual(new Set([alice.id, bob.id]));
+  });
+
+  it("listUsers query skips revoked credentials", async () => {
+    const alice = await store.createUser();
+    const cred = await store.createCredential({
+      usrId: alice.id,
+      type: "password",
+      identifier: "gone@example.com",
+      password: "long-enough-password",
+    });
+    await store.revokeCredential(cred.id);
+    const page = await store.listUsers({ query: "gone@example.com" });
+    expect(page.data).toEqual([]);
+  });
+
+  it("listUsers cursor walks pages", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const u = await store.createUser();
+      ids.push(u.id);
+    }
+    const page1 = await store.listUsers({ limit: 2 });
+    expect(page1.data.map((u) => u.id)).toEqual([ids[0], ids[1]]);
+    const page2 = await store.listUsers({ cursor: page1.nextCursor!, limit: 2 });
+    expect(page2.data.map((u) => u.id)).toEqual([ids[2], ids[3]]);
+    const page3 = await store.listUsers({ cursor: page2.nextCursor!, limit: 2 });
+    expect(page3.data.map((u) => u.id)).toEqual([ids[4]]);
+    expect(page3.nextCursor).toBeNull();
+  });
+
+  it("listUsers returns display_name on each row", async () => {
+    const alice = await store.createUser({ displayName: "Alice" });
+    const bob = await store.createUser();
+    const page = await store.listUsers();
+    const byId = new Map(page.data.map((u) => [u.id, u.displayName]));
+    expect(byId.get(alice.id)).toBe("Alice");
+    expect(byId.get(bob.id)).toBeNull();
+  });
+
   // ───── display_name (ADR 0014) ─────
 
   it("createUser stores displayName when supplied; getUser round-trips it", async () => {
