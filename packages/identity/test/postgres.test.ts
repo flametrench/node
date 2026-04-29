@@ -99,6 +99,57 @@ describe.skipIf(!hasPostgres)("PostgresIdentityStore", () => {
     await expect(store.revokeUser(user.id)).rejects.toThrow(AlreadyTerminalError);
   });
 
+  // ───── display_name (ADR 0014) ─────
+
+  it("createUser stores displayName when supplied; getUser round-trips it", async () => {
+    const user = await store.createUser({ displayName: "Alice" });
+    expect(user.displayName).toBe("Alice");
+    const fetched = await store.getUser(user.id);
+    expect(fetched.displayName).toBe("Alice");
+  });
+
+  it("createUser defaults displayName to null", async () => {
+    const user = await store.createUser();
+    expect(user.displayName).toBeNull();
+  });
+
+  it("updateUser sets, leaves untouched (omitted), and clears displayName", async () => {
+    const user = await store.createUser({ displayName: "Original" });
+    const renamed = await store.updateUser({ usrId: user.id, displayName: "Renamed" });
+    expect(renamed.displayName).toBe("Renamed");
+    const unchanged = await store.updateUser({ usrId: user.id });
+    expect(unchanged.displayName).toBe("Renamed");
+    const cleared = await store.updateUser({ usrId: user.id, displayName: null });
+    expect(cleared.displayName).toBeNull();
+  });
+
+  it("updateUser allows renaming a suspended user", async () => {
+    const user = await store.createUser({ displayName: "Before" });
+    await store.suspendUser(user.id);
+    const renamed = await store.updateUser({ usrId: user.id, displayName: "After" });
+    expect(renamed.displayName).toBe("After");
+    expect(renamed.status).toBe("suspended");
+  });
+
+  it("updateUser on a revoked user raises AlreadyTerminalError", async () => {
+    const user = await store.createUser();
+    await store.revokeUser(user.id);
+    await expect(
+      store.updateUser({ usrId: user.id, displayName: "Whatever" }),
+    ).rejects.toThrow(AlreadyTerminalError);
+  });
+
+  it("updateUser on unknown user raises NotFoundError", async () => {
+    await expect(
+      store.updateUser({ usrId: generate("usr") as UsrId, displayName: "ghost" }),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("displayName accepts full Unicode without normalization", async () => {
+    const user = await store.createUser({ displayName: "山田 太郎" });
+    expect((await store.getUser(user.id)).displayName).toBe("山田 太郎");
+  });
+
   // ───── Credentials ─────
 
   it("creates a password credential and verifyPassword round-trips", async () => {

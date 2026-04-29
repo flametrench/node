@@ -19,8 +19,29 @@ export type CredentialType = "password" | "passkey" | "oidc";
 export interface User {
   id: UsrId;
   status: Status;
+  /** v0.2 (ADR 0014) — optional human-meaningful render string. */
+  displayName: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * Input to {@link IdentityStore.createUser}. v0.2 (ADR 0014) introduces
+ * an optional `displayName`. Pre-v0.2 callers may continue to pass
+ * undefined / no argument; the field defaults to null.
+ */
+export interface CreateUserInput {
+  displayName?: string | null;
+}
+
+/**
+ * Input to {@link IdentityStore.updateUser}. Per ADR 0014 partial-update
+ * semantics: an OMITTED field means "don't change"; an explicit `null`
+ * means "set to null." Use TypeScript's `undefined` vs `null` distinction.
+ */
+export interface UpdateUserInput {
+  usrId: UsrId;
+  displayName?: string | null;
 }
 
 // ─── Credentials (discriminated union on `type`) ───

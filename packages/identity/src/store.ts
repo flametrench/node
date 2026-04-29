@@ -16,6 +16,7 @@ import type {
   CreateCredentialInput,
   CreateSessionInput,
   CreateSessionResult,
+  CreateUserInput,
   Credential,
   CredId,
   FindCredentialInput,
@@ -24,6 +25,7 @@ import type {
   RotateCredentialInput,
   SesId,
   Session,
+  UpdateUserInput,
   User,
   UsrId,
   VerifiedCredentialResult,
@@ -44,8 +46,14 @@ import type {
 export interface IdentityStore {
   // ─── Users ───
 
-  createUser(): Promise<User>;
+  createUser(input?: CreateUserInput): Promise<User>;
   getUser(usrId: UsrId): Promise<User>;
+  /**
+   * Partial update of v0.2 user metadata per ADR 0014. An omitted field
+   * means "don't change"; explicit `null` clears. Suspended users MAY
+   * be updated; revoked users raise AlreadyTerminalError.
+   */
+  updateUser(input: UpdateUserInput): Promise<User>;
   suspendUser(usrId: UsrId): Promise<User>;
   reinstateUser(usrId: UsrId): Promise<User>;
   revokeUser(usrId: UsrId): Promise<User>;

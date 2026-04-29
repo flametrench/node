@@ -81,6 +81,7 @@ import {
   type CreateCredentialInput,
   type CreateSessionInput,
   type CreateSessionResult,
+  type CreateUserInput,
   type CredId,
   type Credential,
   type FindCredentialInput,
@@ -90,6 +91,7 @@ import {
   type SesId,
   type Session,
   type Status,
+  type UpdateUserInput,
   type User,
   type UsrId,
   type VerifiedCredentialResult,
@@ -101,6 +103,7 @@ import {
 interface UsrRow {
   id: string;
   status: Status;
+  display_name: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -169,6 +172,7 @@ function rowToUser(r: UsrRow): User {
   return {
     id: encode("usr", r.id) as UsrId,
     status: r.status,
+    displayName: r.display_name,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -354,30 +358,58 @@ export class PostgresIdentityStore implements IdentityStore {
 
   // ─── Users ───
 
-  async createUser(): Promise<User> {
+  async createUser(input?: CreateUserInput): Promise<User> {
     const id = decode(generate("usr")).uuid;
     const { rows } = await this.pool.query<UsrRow>(
-      `INSERT INTO usr (id) VALUES ($1)
-       RETURNING id, status, created_at, updated_at`,
-      [id],
+      `INSERT INTO usr (id, display_name) VALUES ($1, $2)
+       RETURNING id, status, display_name, created_at, updated_at`,
+      [id, input?.displayName ?? null],
     );
     return rowToUser(rows[0]!);
   }
 
   async getUser(usrId: UsrId): Promise<User> {
     const { rows } = await this.pool.query<UsrRow>(
-      `SELECT id, status, created_at, updated_at FROM usr WHERE id = $1`,
+      `SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = $1`,
       [wireToUuid(usrId)],
     );
     if (rows.length === 0) throw new NotFoundError(`User ${usrId} not found`);
     return rowToUser(rows[0]!);
   }
 
+  async updateUser(input: UpdateUserInput): Promise<User> {
+    return this.tx(async (c) => {
+      const uuid = wireToUuid(input.usrId);
+      const { rows: cur } = await c.query<UsrRow>(
+        `SELECT id, status, display_name, created_at, updated_at
+         FROM usr WHERE id = $1 FOR UPDATE`,
+        [uuid],
+      );
+      if (cur.length === 0) throw new NotFoundError(`User ${input.usrId} not found`);
+      const u = cur[0]!;
+      if (u.status === "revoked") {
+        throw new AlreadyTerminalError(`User ${input.usrId} is revoked; cannot update`);
+      }
+      const newDisplayName =
+        "displayName" in input ? input.displayName ?? null : u.display_name;
+      if (newDisplayName === u.display_name) {
+        return rowToUser(u);
+      }
+      const { rows } = await c.query<UsrRow>(
+        `UPDATE usr SET display_name = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING id, status, display_name, created_at, updated_at`,
+        [newDisplayName, uuid],
+      );
+      return rowToUser(rows[0]!);
+    });
+  }
+
   async suspendUser(usrId: UsrId): Promise<User> {
     return this.tx(async (c) => {
       const uuid = wireToUuid(usrId);
       const cur = await c.query<UsrRow>(
-        `SELECT id, status, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
         [uuid],
       );
       if (cur.rows.length === 0) {
@@ -392,7 +424,7 @@ export class PostgresIdentityStore implements IdentityStore {
       }
       const { rows } = await c.query<UsrRow>(
         `UPDATE usr SET status = 'suspended' WHERE id = $1
-         RETURNING id, status, created_at, updated_at`,
+         RETURNING id, status, display_name, created_at, updated_at`,
         [uuid],
       );
       await c.query(
@@ -408,7 +440,7 @@ export class PostgresIdentityStore implements IdentityStore {
     return this.tx(async (c) => {
       const uuid = wireToUuid(usrId);
       const cur = await c.query<UsrRow>(
-        `SELECT id, status, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
         [uuid],
       );
       if (cur.rows.length === 0) {
@@ -423,7 +455,7 @@ export class PostgresIdentityStore implements IdentityStore {
       }
       const { rows } = await c.query<UsrRow>(
         `UPDATE usr SET status = 'active' WHERE id = $1
-         RETURNING id, status, created_at, updated_at`,
+         RETURNING id, status, display_name, created_at, updated_at`,
         [uuid],
       );
       return rowToUser(rows[0]!);
@@ -434,7 +466,7 @@ export class PostgresIdentityStore implements IdentityStore {
     return this.tx(async (c) => {
       const uuid = wireToUuid(usrId);
       const cur = await c.query<UsrRow>(
-        `SELECT id, status, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = $1 FOR UPDATE`,
         [uuid],
       );
       if (cur.rows.length === 0) {
@@ -458,7 +490,7 @@ export class PostgresIdentityStore implements IdentityStore {
       );
       const { rows } = await c.query<UsrRow>(
         `UPDATE usr SET status = 'revoked' WHERE id = $1
-         RETURNING id, status, created_at, updated_at`,
+         RETURNING id, status, display_name, created_at, updated_at`,
         [uuid],
       );
       return rowToUser(rows[0]!);

@@ -49,6 +49,7 @@ import {
   type CreateCredentialInput,
   type CreateSessionInput,
   type CreateSessionResult,
+  type CreateUserInput,
   type CredId,
   type Credential,
   type CredentialType,
@@ -62,6 +63,7 @@ import {
   type SesId,
   type Session,
   type Status,
+  type UpdateUserInput,
   type User,
   type UsrId,
   type VerifyPasswordInput,
@@ -207,11 +209,12 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   // ─── Users ───
 
-  async createUser(): Promise<User> {
+  async createUser(input?: CreateUserInput): Promise<User> {
     const now = this.now();
     const user: User = {
       id: this.newUsrId(),
       status: "active",
+      displayName: input?.displayName ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -221,6 +224,20 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   async getUser(usrId: UsrId): Promise<User> {
     return this.requireUser(usrId);
+  }
+
+  async updateUser(input: UpdateUserInput): Promise<User> {
+    const u = this.requireUser(input.usrId);
+    if (u.status === "revoked") {
+      throw new AlreadyTerminalError(`User ${input.usrId} is revoked; cannot update`);
+    }
+    const newDisplayName = "displayName" in input ? input.displayName ?? null : u.displayName;
+    if (newDisplayName === u.displayName) {
+      return u;
+    }
+    const updated: User = { ...u, displayName: newDisplayName, updatedAt: this.now() };
+    this.users.set(input.usrId, updated);
+    return updated;
   }
 
   async suspendUser(usrId: UsrId): Promise<User> {

@@ -97,6 +97,52 @@ describe("InMemoryIdentityStore", () => {
     });
   });
 
+  // ───────────── display_name (ADR 0014) ─────────────
+
+  describe("display_name", () => {
+    it("createUser stores displayName when supplied", async () => {
+      const u = await store.createUser({ displayName: "Alice" });
+      expect(u.displayName).toBe("Alice");
+      expect((await store.getUser(u.id)).displayName).toBe("Alice");
+    });
+
+    it("createUser defaults displayName to null", async () => {
+      const u = await store.createUser();
+      expect(u.displayName).toBeNull();
+    });
+
+    it("updateUser sets, no-ops on omit, and clears displayName", async () => {
+      const u = await store.createUser({ displayName: "Original" });
+      const renamed = await store.updateUser({ usrId: u.id, displayName: "Renamed" });
+      expect(renamed.displayName).toBe("Renamed");
+      const unchanged = await store.updateUser({ usrId: u.id });
+      expect(unchanged.displayName).toBe("Renamed");
+      const cleared = await store.updateUser({ usrId: u.id, displayName: null });
+      expect(cleared.displayName).toBeNull();
+    });
+
+    it("updateUser allows renaming a suspended user", async () => {
+      const u = await store.createUser({ displayName: "Before" });
+      await store.suspendUser(u.id);
+      const renamed = await store.updateUser({ usrId: u.id, displayName: "After" });
+      expect(renamed.displayName).toBe("After");
+      expect(renamed.status).toBe("suspended");
+    });
+
+    it("updateUser on a revoked user raises AlreadyTerminalError", async () => {
+      const u = await store.createUser();
+      await store.revokeUser(u.id);
+      await expect(
+        store.updateUser({ usrId: u.id, displayName: "Whatever" }),
+      ).rejects.toThrow(AlreadyTerminalError);
+    });
+
+    it("displayName accepts full Unicode without normalization", async () => {
+      const u = await store.createUser({ displayName: "山田 太郎" });
+      expect((await store.getUser(u.id)).displayName).toBe("山田 太郎");
+    });
+  });
+
   // ───────────── Password credentials ─────────────
 
   describe("password credentials", () => {
