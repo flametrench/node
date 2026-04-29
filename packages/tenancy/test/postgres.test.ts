@@ -436,6 +436,71 @@ describe.skipIf(!hasPostgres)("PostgresTenancyStore", () => {
       store.updateOrg({ orgId: org.id, name: "Whatever" }),
     ).rejects.toThrow(AlreadyTerminalError);
   });
+
+  // ───── Outer-transaction nesting (ADR 0013) ─────
+
+  it("createOrg cooperates with an outer transaction (no nested-BEGIN error)", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTenancyStore(client);
+      const { org } = await nested.createOrg({ creator: alice, name: "Outer", slug: "outer" });
+      await client.query("COMMIT");
+      const fetched = await store.getOrg(org.id);
+      expect(fetched.name).toBe("Outer");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("rolling back an outer transaction undoes the inner createOrg", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTenancyStore(client);
+      const { org } = await nested.createOrg({ creator: alice, slug: "will-rollback" });
+      await client.query("ROLLBACK");
+      await expect(store.getOrg(org.id)).rejects.toThrow(NotFoundError);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("outer transaction can commit a second SDK call after the first one rolls back its savepoint", async () => {
+    // Seed a slug so the next createOrg with the same slug conflicts.
+    await store.createOrg({ creator: bob, slug: "taken" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTenancyStore(client);
+      await expect(
+        nested.createOrg({ creator: alice, slug: "taken" }),
+      ).rejects.toThrow(OrgSlugConflictError);
+      // Outer txn is still usable — savepoint rolled back the failure.
+      const { org: survivor } = await nested.createOrg({ creator: carol, slug: "survivor" });
+      await client.query("COMMIT");
+      const fetched = await store.getOrg(survivor.id);
+      expect(fetched.slug).toBe("survivor");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("multiple SDK calls in one outer transaction commit-or-rollback together", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTenancyStore(client);
+      const { org: orgA } = await nested.createOrg({ creator: alice, slug: "group-a" });
+      const { org: orgB } = await nested.createOrg({ creator: bob, slug: "group-b" });
+      await client.query("ROLLBACK");
+      await expect(store.getOrg(orgA.id)).rejects.toThrow(NotFoundError);
+      await expect(store.getOrg(orgB.id)).rejects.toThrow(NotFoundError);
+    } finally {
+      client.release();
+    }
+  });
 });
 
 if (!hasPostgres) {

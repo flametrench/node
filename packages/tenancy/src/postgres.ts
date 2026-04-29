@@ -34,8 +34,28 @@
  * and converts to/from UUIDs internally.
  */
 
+import { randomBytes } from "node:crypto";
+
 import { decode, decodeAny, encode, generate } from "@flametrench/ids";
 import type { Pool, PoolClient } from "pg";
+
+// ─── ADR 0013 savepoint helpers ───
+
+/** See identity/src/postgres.ts for rationale. */
+function callerName(): string {
+  const stack = new Error().stack ?? "";
+  const lines = stack.split("\n");
+  const target = lines[3] ?? "";
+  const m = target.match(/at\s+(?:async\s+)?(?:[\w$.]+\.)?([\w$]+)\s/);
+  return m?.[1] ?? "tx";
+}
+
+function makeSavepointName(method: string): string {
+  const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
+  const safe = sanitized.length > 0 ? sanitized : "tx";
+  const rand = randomBytes(4).toString("hex");
+  return `ft_${safe}_${rand}`;
+}
 
 import {
   AlreadyTerminalError,
@@ -278,13 +298,27 @@ export interface PostgresTenancyStoreOptions {
 }
 
 /**
+ * Connection types accepted by the Postgres adapter.
+ *
+ * - **`Pool`** — adapter owns transactions; each `tx()` call acquires a
+ *   client, runs `BEGIN`/`COMMIT`, and releases. Single-statement queries
+ *   run directly on the pool. This is the standalone case.
+ * - **`PoolClient`** — caller owns the transaction (per ADR 0013). The
+ *   adapter assumes the caller has already issued `BEGIN` and uses
+ *   `SAVEPOINT`/`RELEASE` for its internal atomicity boundaries. Adopters
+ *   wrapping multiple SDK calls in one outer transaction MUST construct
+ *   every participating store with the same `PoolClient`.
+ */
+export type PostgresTenancyClient = Pool | PoolClient;
+
+/**
  * Postgres-backed TenancyStore. See file-level docs for usage.
  */
 export class PostgresTenancyStore implements TenancyStore {
   private readonly clock: () => Date;
 
   constructor(
-    private readonly pool: Pool,
+    private readonly pool: PostgresTenancyClient,
     options: PostgresTenancyStoreOptions = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
@@ -294,10 +328,29 @@ export class PostgresTenancyStore implements TenancyStore {
     return this.clock();
   }
 
+  /** True when the adapter was constructed with a caller-owned PoolClient. */
+  private get clientIsCallerOwned(): boolean {
+    return typeof (this.pool as { release?: unknown }).release === "function";
+  }
+
   // ─── Transaction helper ───
 
   private async tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+    if (this.clientIsCallerOwned) {
+      const c = this.pool as PoolClient;
+      const sp = makeSavepointName(callerName());
+      await c.query(`SAVEPOINT ${sp}`);
+      try {
+        const out = await fn(c);
+        await c.query(`RELEASE SAVEPOINT ${sp}`);
+        return out;
+      } catch (err) {
+        await c.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+        await c.query(`RELEASE SAVEPOINT ${sp}`).catch(() => {});
+        throw err;
+      }
+    }
+    const client = await (this.pool as Pool).connect();
     try {
       await client.query("BEGIN");
       const result = await fn(client);

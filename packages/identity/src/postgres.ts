@@ -99,6 +99,33 @@ import {
   type VerifyPasswordInput,
 } from "./types.js";
 
+// ─── ADR 0013 savepoint helpers ───
+
+/**
+ * Read the immediate adapter method that called into `tx`/`nested`. Used
+ * for savepoint names so logs (`pg_stat_activity`, `auto_explain`,
+ * pgBadger) stay grep-able. Falls back to `"tx"` for closures or anonymous
+ * frames. V8 stack format: parsing is best-effort; correctness of the
+ * savepoint contract does NOT depend on the method-name lookup, only on
+ * the random suffix.
+ */
+function callerName(): string {
+  const stack = new Error().stack ?? "";
+  const lines = stack.split("\n");
+  // line 0: "Error", line 1: callerName, line 2: tx/nested, line 3: caller.
+  const target = lines[3] ?? "";
+  const m = target.match(/at\s+(?:async\s+)?(?:[\w$.]+\.)?([\w$]+)\s/);
+  return m?.[1] ?? "tx";
+}
+
+/** Build a savepoint name matching ADR 0013: `ft_<method>_<random>`. */
+function makeSavepointName(method: string): string {
+  const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
+  const safe = sanitized.length > 0 ? sanitized : "tx";
+  const rand = randomBytes(4).toString("hex");
+  return `ft_${safe}_${rand}`;
+}
+
 // ─── Row shapes ───
 
 interface UsrRow {
@@ -325,6 +352,21 @@ export interface PostgresIdentityStoreOptions {
   clock?: () => Date;
 }
 
+/**
+ * Connection types accepted by the Postgres adapter.
+ *
+ * - **`Pool`** — adapter owns transactions; each `tx()` call acquires a
+ *   client, runs `BEGIN`/`COMMIT`, and releases. Single-statement queries
+ *   run directly on the pool. This is the standalone case.
+ * - **`PoolClient`** — caller owns the transaction (per ADR 0013). The
+ *   adapter assumes the caller has already issued `BEGIN` (or will) and
+ *   uses `SAVEPOINT`/`RELEASE` for its internal atomicity boundaries
+ *   instead of opening its own transaction. Adopters wrapping multiple
+ *   SDK calls in one outer transaction MUST construct every participating
+ *   store with the same `PoolClient`.
+ */
+export type PostgresIdentityClient = Pool | PoolClient;
+
 export class PostgresIdentityStore implements IdentityStore {
   /** Pending TOTP/WebAuthn factor TTL per ADR 0008. */
   static readonly PENDING_FACTOR_TTL_SECONDS = 600;
@@ -332,7 +374,7 @@ export class PostgresIdentityStore implements IdentityStore {
   private readonly clock: () => Date;
 
   constructor(
-    private readonly pool: Pool,
+    private readonly pool: PostgresIdentityClient,
     options: PostgresIdentityStoreOptions = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
@@ -342,8 +384,42 @@ export class PostgresIdentityStore implements IdentityStore {
     return this.clock();
   }
 
+  /**
+   * True when the adapter was constructed with a caller-owned PoolClient
+   * (vs a Pool). Detects via `release` — present on PoolClient (and only
+   * called by callers when they're done with the checked-out client),
+   * absent on Pool. Both types have `connect` and `query`, so those are
+   * not distinguishing.
+   */
+  private get clientIsCallerOwned(): boolean {
+    return typeof (this.pool as { release?: unknown }).release === "function";
+  }
+
+  /**
+   * Run $fn atomically. Standalone (Pool): acquires a client, BEGIN/COMMIT,
+   * release. Nested (PoolClient): SAVEPOINT/RELEASE on the existing client
+   * per ADR 0013 — adapter cooperates with the caller's outer transaction.
+   *
+   * Savepoint name follows `ft_<method>_<random>`: method prefix preserves
+   * grep-ability in pg_stat_activity; random suffix turns pairing bugs into
+   * loud `savepoint does not exist` errors instead of silent half-commits.
+   */
   private async tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
-    const c = await this.pool.connect();
+    if (this.clientIsCallerOwned) {
+      const c = this.pool as PoolClient;
+      const sp = makeSavepointName(callerName());
+      await c.query(`SAVEPOINT ${sp}`);
+      try {
+        const out = await fn(c);
+        await c.query(`RELEASE SAVEPOINT ${sp}`);
+        return out;
+      } catch (err) {
+        await c.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+        await c.query(`RELEASE SAVEPOINT ${sp}`).catch(() => {});
+        throw err;
+      }
+    }
+    const c = await (this.pool as Pool).connect();
     try {
       await c.query("BEGIN");
       const out = await fn(c);
@@ -357,16 +433,43 @@ export class PostgresIdentityStore implements IdentityStore {
     }
   }
 
+  /**
+   * Shield $fn with a savepoint when the adapter is using a caller-owned
+   * PoolClient (i.e. inside an adopter's outer transaction); pass through
+   * directly when standalone (Pool). Used by single-statement methods that
+   * don't need their own BEGIN/COMMIT but must not contaminate an outer
+   * transaction on a constraint violation. Postgres aborts the entire
+   * transaction on any statement-level error (SQLSTATE 25P02 for subsequent
+   * statements) until the next ROLLBACK or ROLLBACK TO SAVEPOINT.
+   */
+  private async nested<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.clientIsCallerOwned) return fn();
+    const c = this.pool as PoolClient;
+    const sp = makeSavepointName(callerName());
+    await c.query(`SAVEPOINT ${sp}`);
+    try {
+      const out = await fn();
+      await c.query(`RELEASE SAVEPOINT ${sp}`);
+      return out;
+    } catch (err) {
+      await c.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+      await c.query(`RELEASE SAVEPOINT ${sp}`).catch(() => {});
+      throw err;
+    }
+  }
+
   // ─── Users ───
 
   async createUser(input?: CreateUserInput): Promise<User> {
-    const id = decode(generate("usr")).uuid;
-    const { rows } = await this.pool.query<UsrRow>(
-      `INSERT INTO usr (id, display_name) VALUES ($1, $2)
-       RETURNING id, status, display_name, created_at, updated_at`,
-      [id, input?.displayName ?? null],
-    );
-    return rowToUser(rows[0]!);
+    return this.nested(async () => {
+      const id = decode(generate("usr")).uuid;
+      const { rows } = await this.pool.query<UsrRow>(
+        `INSERT INTO usr (id, display_name) VALUES ($1, $2)
+         RETURNING id, status, display_name, created_at, updated_at`,
+        [id, input?.displayName ?? null],
+      );
+      return rowToUser(rows[0]!);
+    });
   }
 
   async getUser(usrId: UsrId): Promise<User> {
@@ -537,72 +640,74 @@ export class PostgresIdentityStore implements IdentityStore {
   // ─── Credentials ───
 
   async createCredential(input: CreateCredentialInput): Promise<Credential> {
-    const userUuid = wireToUuid(input.usrId);
-    const userRes = await this.pool.query<UsrRow>(
-      `SELECT status FROM usr WHERE id = $1`,
-      [userUuid],
-    );
-    if (userRes.rows.length === 0) {
-      throw new NotFoundError(`User ${input.usrId} not found`);
-    }
-    if (userRes.rows[0]!.status !== "active") {
-      throw new PreconditionError(
-        `Cannot create credentials for ${userRes.rows[0]!.status} user`,
-        "user_not_active",
+    return this.nested(async () => {
+      const userUuid = wireToUuid(input.usrId);
+      const userRes = await this.pool.query<UsrRow>(
+        `SELECT status FROM usr WHERE id = $1`,
+        [userUuid],
       );
-    }
-    const id = decode(generate("cred")).uuid;
-    try {
-      let row: CredRow;
-      if (input.type === "password") {
-        const hash = await argon2.hash(input.password, {
-          type: argon2.argon2id,
-          memoryCost: ARGON2ID_FLOOR.memoryCost,
-          timeCost: ARGON2ID_FLOOR.timeCost,
-          parallelism: ARGON2ID_FLOOR.parallelism,
-        });
-        const { rows } = await this.pool.query<CredRow>(
-          `INSERT INTO cred (id, usr_id, type, identifier, password_hash)
-           VALUES ($1, $2, 'password', $3, $4)
-           RETURNING ${CRED_COLS}`,
-          [id, userUuid, input.identifier, hash],
-        );
-        row = rows[0]!;
-      } else if (input.type === "passkey") {
-        const { rows } = await this.pool.query<CredRow>(
-          `INSERT INTO cred (id, usr_id, type, identifier,
-                             passkey_public_key, passkey_sign_count, passkey_rp_id)
-           VALUES ($1, $2, 'passkey', $3, $4, $5, $6)
-           RETURNING ${CRED_COLS}`,
-          [
-            id,
-            userUuid,
-            input.identifier,
-            Buffer.from(input.publicKey),
-            input.signCount,
-            input.rpId,
-          ],
-        );
-        row = rows[0]!;
-      } else {
-        const { rows } = await this.pool.query<CredRow>(
-          `INSERT INTO cred (id, usr_id, type, identifier,
-                             oidc_issuer, oidc_subject)
-           VALUES ($1, $2, 'oidc', $3, $4, $5)
-           RETURNING ${CRED_COLS}`,
-          [id, userUuid, input.identifier, input.oidcIssuer, input.oidcSubject],
-        );
-        row = rows[0]!;
+      if (userRes.rows.length === 0) {
+        throw new NotFoundError(`User ${input.usrId} not found`);
       }
-      return rowToCredential(row);
-    } catch (err) {
-      if (isUniqueViolation(err)) {
-        throw new DuplicateCredentialError(
-          `An active ${input.type} credential already exists for identifier ${input.identifier}`,
+      if (userRes.rows[0]!.status !== "active") {
+        throw new PreconditionError(
+          `Cannot create credentials for ${userRes.rows[0]!.status} user`,
+          "user_not_active",
         );
       }
-      throw err;
-    }
+      const id = decode(generate("cred")).uuid;
+      try {
+        let row: CredRow;
+        if (input.type === "password") {
+          const hash = await argon2.hash(input.password, {
+            type: argon2.argon2id,
+            memoryCost: ARGON2ID_FLOOR.memoryCost,
+            timeCost: ARGON2ID_FLOOR.timeCost,
+            parallelism: ARGON2ID_FLOOR.parallelism,
+          });
+          const { rows } = await this.pool.query<CredRow>(
+            `INSERT INTO cred (id, usr_id, type, identifier, password_hash)
+             VALUES ($1, $2, 'password', $3, $4)
+             RETURNING ${CRED_COLS}`,
+            [id, userUuid, input.identifier, hash],
+          );
+          row = rows[0]!;
+        } else if (input.type === "passkey") {
+          const { rows } = await this.pool.query<CredRow>(
+            `INSERT INTO cred (id, usr_id, type, identifier,
+                               passkey_public_key, passkey_sign_count, passkey_rp_id)
+             VALUES ($1, $2, 'passkey', $3, $4, $5, $6)
+             RETURNING ${CRED_COLS}`,
+            [
+              id,
+              userUuid,
+              input.identifier,
+              Buffer.from(input.publicKey),
+              input.signCount,
+              input.rpId,
+            ],
+          );
+          row = rows[0]!;
+        } else {
+          const { rows } = await this.pool.query<CredRow>(
+            `INSERT INTO cred (id, usr_id, type, identifier,
+                               oidc_issuer, oidc_subject)
+             VALUES ($1, $2, 'oidc', $3, $4, $5)
+             RETURNING ${CRED_COLS}`,
+            [id, userUuid, input.identifier, input.oidcIssuer, input.oidcSubject],
+          );
+          row = rows[0]!;
+        }
+        return rowToCredential(row);
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          throw new DuplicateCredentialError(
+            `An active ${input.type} credential already exists for identifier ${input.identifier}`,
+          );
+        }
+        throw err;
+      }
+    });
   }
 
   async getCredential(credId: CredId): Promise<Credential> {

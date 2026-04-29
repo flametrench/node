@@ -31,6 +31,13 @@ export {
 } from "./in-memory.js";
 
 export {
+  PostgresTupleStore,
+  PostgresShareStore,
+  type PostgresAuthzClient,
+  type PostgresTupleStoreOptions,
+} from "./postgres.js";
+
+export {
   AuthzError,
   DuplicateTupleError,
   EmptyRelationSetError,

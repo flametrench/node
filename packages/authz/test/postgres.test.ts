@@ -376,6 +376,140 @@ describe.skipIf(!hasPostgres)("PostgresTupleStore", () => {
     const list = await store.listTuplesByObject("proj", wireProj);
     expect(list.data).toHaveLength(1);
   });
+
+  // ───── Outer-transaction nesting (ADR 0013) ─────
+
+  it("createTuple cooperates with an outer transaction (no nested-BEGIN error)", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTupleStore(client);
+      const t = await nested.createTuple({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      await client.query("COMMIT");
+      const r = await store.check({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      expect(r.allowed).toBe(true);
+      expect(t.id).toMatch(/^tup_[0-9a-f]{32}$/);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("rolling back an outer transaction undoes the inner createTuple", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTupleStore(client);
+      await nested.createTuple({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      await client.query("ROLLBACK");
+      const r = await store.check({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      expect(r.allowed).toBe(false);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("outer transaction can commit a second SDK call after first rolls back its savepoint (duplicate tuple)", async () => {
+    // Seed a tuple so the next createTuple with the same natural key conflicts.
+    await store.createTuple({
+      subjectType: "usr",
+      subjectId: alice,
+      relation: "viewer",
+      objectType: "proj",
+      objectId: project42,
+    });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTupleStore(client);
+      await expect(
+        nested.createTuple({
+          subjectType: "usr",
+          subjectId: alice,
+          relation: "viewer",
+          objectType: "proj",
+          objectId: project42,
+        }),
+      ).rejects.toThrow(DuplicateTupleError);
+      // Outer txn still usable — savepoint rolled back the duplicate.
+      const survivor = await nested.createTuple({
+        subjectType: "usr",
+        subjectId: bob,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      await client.query("COMMIT");
+      expect(survivor.subjectId).toBe(bob);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("multiple SDK calls in one outer transaction commit-or-rollback together", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresTupleStore(client);
+      await nested.createTuple({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      await nested.createTuple({
+        subjectType: "usr",
+        subjectId: bob,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project99,
+      });
+      await client.query("ROLLBACK");
+      const a = await store.check({
+        subjectType: "usr",
+        subjectId: alice,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project42,
+      });
+      const b = await store.check({
+        subjectType: "usr",
+        subjectId: bob,
+        relation: "viewer",
+        objectType: "proj",
+        objectId: project99,
+      });
+      expect(a.allowed).toBe(false);
+      expect(b.allowed).toBe(false);
+    } finally {
+      client.release();
+    }
+  });
 });
 
 if (!hasPostgres) {

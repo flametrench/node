@@ -42,6 +42,11 @@ export type {
 export { ARGON2ID_FLOOR } from "./types.js";
 
 export type { IdentityStore } from "./store.js";
+export {
+  PostgresIdentityStore,
+  type PostgresIdentityClient,
+  type PostgresIdentityStoreOptions,
+} from "./postgres.js";
 
 export {
   InMemoryIdentityStore,

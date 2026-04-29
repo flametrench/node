@@ -569,6 +569,96 @@ describe.skipIf(!hasPostgres)("PostgresIdentityStore", () => {
       NotFoundError,
     );
   });
+
+  // ───── Outer-transaction nesting (ADR 0013) ─────
+
+  it("createUser cooperates with an outer transaction (no nested-BEGIN error)", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresIdentityStore(client);
+      const user = await nested.createUser({ displayName: "Nested" });
+      // Outside-the-txn store cannot see the row yet.
+      await expect(store.getUser(user.id)).rejects.toThrow(NotFoundError);
+      await client.query("COMMIT");
+      const fetched = await store.getUser(user.id);
+      expect(fetched.displayName).toBe("Nested");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("rolling back an outer transaction undoes the inner createUser + createCredential", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresIdentityStore(client);
+      const user = await nested.createUser();
+      await nested.createCredential({
+        usrId: user.id,
+        type: "password",
+        identifier: "rolled-back@example.test",
+        password: "hunter22-long-enough",
+      });
+      await client.query("ROLLBACK");
+      await expect(store.getUser(user.id)).rejects.toThrow(NotFoundError);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("outer transaction can commit a second SDK call after the first one rolls back its savepoint", async () => {
+    // Seed a credential in the outside store so the nested duplicate fails.
+    const seed = await store.createUser();
+    await store.createCredential({
+      usrId: seed.id,
+      type: "password",
+      identifier: "taken@example.test",
+      password: "hunter22-long-enough",
+    });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresIdentityStore(client);
+      const user = await nested.createUser();
+      await expect(
+        nested.createCredential({
+          usrId: user.id,
+          type: "password",
+          identifier: "taken@example.test",
+          password: "hunter22-long-enough",
+        }),
+      ).rejects.toThrow(DuplicateCredentialError);
+      // Outer txn is still usable — savepoint rolled back the failure.
+      const cred = await nested.createCredential({
+        usrId: user.id,
+        type: "password",
+        identifier: "survivor@example.test",
+        password: "hunter22-long-enough",
+      });
+      await client.query("COMMIT");
+      expect(cred.identifier).toBe("survivor@example.test");
+      expect((await store.getUser(user.id)).id).toBe(user.id);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("multiple SDK calls in one outer transaction commit-or-rollback together", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresIdentityStore(client);
+      const a = await nested.createUser();
+      const b = await nested.createUser();
+      await client.query("ROLLBACK");
+      await expect(store.getUser(a.id)).rejects.toThrow(NotFoundError);
+      await expect(store.getUser(b.id)).rejects.toThrow(NotFoundError);
+    } finally {
+      client.release();
+    }
+  });
 });
 
 if (!hasPostgres) {

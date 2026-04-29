@@ -61,6 +61,12 @@ export {
 } from "./in-memory.js";
 
 export {
+  PostgresTenancyStore,
+  type PostgresTenancyClient,
+  type PostgresTenancyStoreOptions,
+} from "./postgres.js";
+
+export {
   AlreadyTerminalError,
   DuplicateMembershipError,
   ForbiddenError,

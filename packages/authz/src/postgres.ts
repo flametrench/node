@@ -33,6 +33,52 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { decode, decodeAny, encode, generate } from "@flametrench/ids";
 import type { Pool, PoolClient } from "pg";
 
+// ─── ADR 0013 savepoint helpers ───
+
+/** See identity/src/postgres.ts for rationale. */
+function callerName(): string {
+  const stack = new Error().stack ?? "";
+  const lines = stack.split("\n");
+  const target = lines[3] ?? "";
+  const m = target.match(/at\s+(?:async\s+)?(?:[\w$.]+\.)?([\w$]+)\s/);
+  return m?.[1] ?? "tx";
+}
+
+function makeSavepointName(method: string): string {
+  const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
+  const safe = sanitized.length > 0 ? sanitized : "tx";
+  const rand = randomBytes(4).toString("hex");
+  return `ft_${safe}_${rand}`;
+}
+
+/**
+ * Connection types accepted by the Postgres adapters. See ADR 0013 + the
+ * identity/tenancy adapter docstrings for the contract.
+ */
+export type PostgresAuthzClient = Pool | PoolClient;
+
+function clientIsCallerOwned(client: PostgresAuthzClient): boolean {
+  return typeof (client as { release?: unknown }).release === "function";
+}
+
+async function withSavepoint<T>(
+  c: PoolClient,
+  fn: () => Promise<T>,
+  caller: string,
+): Promise<T> {
+  const sp = makeSavepointName(caller);
+  await c.query(`SAVEPOINT ${sp}`);
+  try {
+    const out = await fn();
+    await c.query(`RELEASE SAVEPOINT ${sp}`);
+    return out;
+  } catch (err) {
+    await c.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+    await c.query(`RELEASE SAVEPOINT ${sp}`).catch(() => {});
+    throw err;
+  }
+}
+
 import {
   DuplicateTupleError,
   EmptyRelationSetError,
@@ -130,7 +176,7 @@ export class PostgresTupleStore implements TupleStore {
   private readonly clock: () => Date;
 
   constructor(
-    private readonly pool: Pool,
+    private readonly pool: PostgresAuthzClient,
     options: PostgresTupleStoreOptions = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
@@ -138,6 +184,18 @@ export class PostgresTupleStore implements TupleStore {
 
   private now(): Date {
     return this.clock();
+  }
+
+  /**
+   * Shield $fn with a savepoint when nested in a caller-owned outer
+   * transaction; pass through directly when standalone (Pool). See ADR 0013
+   * — single-statement INSERT/UPDATE/DELETE methods need shielding so a
+   * constraint violation rolls back to the savepoint instead of poisoning
+   * the outer transaction (Postgres SQLSTATE 25P02).
+   */
+  private async nested<T>(fn: () => Promise<T>): Promise<T> {
+    if (!clientIsCallerOwned(this.pool)) return fn();
+    return withSavepoint(this.pool as PoolClient, fn, callerName());
   }
 
   // ─── Mutations ───
@@ -155,15 +213,22 @@ export class PostgresTupleStore implements TupleStore {
         "object_type",
       );
     }
-    const id = decode(generate("tup")).uuid;
-    const subjectUuid = wireToUuid(input.subjectId);
-    const objectUuid = objectIdToUuid(input.objectId);
-    const createdByUuid = input.createdBy ? wireToUuid(input.createdBy) : null;
-    const now = this.now();
-    try {
+    return this.nested(async () => {
+      const id = decode(generate("tup")).uuid;
+      const subjectUuid = wireToUuid(input.subjectId);
+      const objectUuid = objectIdToUuid(input.objectId);
+      const createdByUuid = input.createdBy ? wireToUuid(input.createdBy) : null;
+      const now = this.now();
+      // ON CONFLICT DO NOTHING avoids raising 23505 inside an outer
+      // transaction (ADR 0013). On natural-key conflict the INSERT
+      // returns no rows; we then SELECT the existing row and raise
+      // DuplicateTupleError. The previous catch-and-SELECT pattern was
+      // incompatible with savepoint shielding because the follow-up
+      // SELECT would run inside a Postgres-aborted transaction.
       const { rows } = await this.pool.query<TupRow>(
         `INSERT INTO tup (id, subject_type, subject_id, relation, object_type, object_id, created_at, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (subject_type, subject_id, relation, object_type, object_id) DO NOTHING
          RETURNING id, subject_type, subject_id, relation, object_type, object_id, created_at, created_by`,
         [
           id,
@@ -176,45 +241,51 @@ export class PostgresTupleStore implements TupleStore {
           createdByUuid,
         ],
       );
-      return rowToTuple(rows[0]!);
-    } catch (err) {
-      if (isUniqueViolation(err)) {
-        const { rows } = await this.pool.query<{ id: string }>(
-          `SELECT id FROM tup
-           WHERE subject_type = $1 AND subject_id = $2 AND relation = $3
-             AND object_type = $4 AND object_id = $5`,
-          [input.subjectType, subjectUuid, input.relation, input.objectType, objectUuid],
-        );
-        if (rows.length > 0) {
-          throw new DuplicateTupleError(
-            `Tuple with identical natural key already exists`,
-            encode("tup", rows[0]!.id) as TupId,
-          );
-        }
+      if (rows.length > 0) {
+        return rowToTuple(rows[0]!);
       }
-      throw err;
-    }
+      const { rows: existing } = await this.pool.query<{ id: string }>(
+        `SELECT id FROM tup
+         WHERE subject_type = $1 AND subject_id = $2 AND relation = $3
+           AND object_type = $4 AND object_id = $5`,
+        [input.subjectType, subjectUuid, input.relation, input.objectType, objectUuid],
+      );
+      if (existing.length === 0) {
+        // Race: another connection inserted-then-deleted between our
+        // ON CONFLICT and the SELECT. Surface a generic error so callers
+        // can retry.
+        throw new Error("Tuple natural-key conflict resolved after insert lost the row; retry.");
+      }
+      throw new DuplicateTupleError(
+        `Tuple with identical natural key already exists`,
+        encode("tup", existing[0]!.id) as TupId,
+      );
+    });
   }
 
   async deleteTuple(id: TupId): Promise<void> {
-    const { rowCount } = await this.pool.query(
-      `DELETE FROM tup WHERE id = $1`,
-      [wireToUuid(id)],
-    );
-    if (rowCount === 0) {
-      throw new TupleNotFoundError(`Tuple ${id} not found`);
-    }
+    await this.nested(async () => {
+      const { rowCount } = await this.pool.query(
+        `DELETE FROM tup WHERE id = $1`,
+        [wireToUuid(id)],
+      );
+      if (rowCount === 0) {
+        throw new TupleNotFoundError(`Tuple ${id} not found`);
+      }
+    });
   }
 
   async cascadeRevokeSubject(
     subjectType: SubjectType,
     subjectId: UsrId,
   ): Promise<number> {
-    const { rowCount } = await this.pool.query(
-      `DELETE FROM tup WHERE subject_type = $1 AND subject_id = $2`,
-      [subjectType, wireToUuid(subjectId)],
-    );
-    return rowCount ?? 0;
+    return this.nested(async () => {
+      const { rowCount } = await this.pool.query(
+        `DELETE FROM tup WHERE subject_type = $1 AND subject_id = $2`,
+        [subjectType, wireToUuid(subjectId)],
+      );
+      return rowCount ?? 0;
+    });
   }
 
   // ─── check() / checkAny() ───
@@ -326,14 +397,6 @@ function paginate(rows: TupRow[], limit: number): Page<Tuple> {
   return { data, nextCursor };
 }
 
-/** Postgres SQLSTATE 23505 = unique_violation. */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object"
-    && err !== null
-    && (err as { code?: string }).code === "23505"
-  );
-}
 
 // ─── PostgresShareStore (ADR 0012) ──────────────────────────────────
 
@@ -391,7 +454,7 @@ export class PostgresShareStore implements ShareStore {
   private readonly clock: () => Date;
 
   constructor(
-    private readonly pool: Pool,
+    private readonly pool: PostgresAuthzClient,
     options: { clock?: () => Date } = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
@@ -402,7 +465,11 @@ export class PostgresShareStore implements ShareStore {
   }
 
   private async tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
-    const c = await this.pool.connect();
+    if (clientIsCallerOwned(this.pool)) {
+      const c = this.pool as PoolClient;
+      return withSavepoint(c, () => fn(c), callerName());
+    }
+    const c = await (this.pool as Pool).connect();
     try {
       await c.query("BEGIN");
       const out = await fn(c);
@@ -414,6 +481,11 @@ export class PostgresShareStore implements ShareStore {
     } finally {
       c.release();
     }
+  }
+
+  private async nested<T>(fn: () => Promise<T>): Promise<T> {
+    if (!clientIsCallerOwned(this.pool)) return fn();
+    return withSavepoint(this.pool as PoolClient, fn, callerName());
   }
 
   async createShare(input: CreateShareInput): Promise<CreateShareResult> {
@@ -441,49 +513,51 @@ export class PostgresShareStore implements ShareStore {
         "expires_in_seconds",
       );
     }
-    const createdByUuid = wireToUuid(input.createdBy);
-    // ADR 0012: createdBy MUST resolve to an active user. The DDL FK
-    // enforces existence; status is checked here at the SDK layer.
-    // Suspended/revoked users with leaked credentials cannot mint shares.
-    const userStatus = await this.pool.query<{ status: string }>(
-      `SELECT status FROM usr WHERE id = $1`,
-      [createdByUuid],
-    );
-    if (userStatus.rows.length === 0) {
-      throw new PreconditionError(
-        `createdBy ${input.createdBy} does not exist`,
-        "creator_not_found",
+    return this.nested(async () => {
+      const createdByUuid = wireToUuid(input.createdBy);
+      // ADR 0012: createdBy MUST resolve to an active user. The DDL FK
+      // enforces existence; status is checked here at the SDK layer.
+      // Suspended/revoked users with leaked credentials cannot mint shares.
+      const userStatus = await this.pool.query<{ status: string }>(
+        `SELECT status FROM usr WHERE id = $1`,
+        [createdByUuid],
       );
-    }
-    if (userStatus.rows[0]!.status !== "active") {
-      throw new PreconditionError(
-        `createdBy ${input.createdBy} is ${userStatus.rows[0]!.status}; only active users can mint shares`,
-        "creator_not_active",
+      if (userStatus.rows.length === 0) {
+        throw new PreconditionError(
+          `createdBy ${input.createdBy} does not exist`,
+          "creator_not_found",
+        );
+      }
+      if (userStatus.rows[0]!.status !== "active") {
+        throw new PreconditionError(
+          `createdBy ${input.createdBy} is ${userStatus.rows[0]!.status}; only active users can mint shares`,
+          "creator_not_active",
+        );
+      }
+      const id = decode(generate("shr")).uuid;
+      const token = generateShareToken();
+      const tokenHash = hashTokenBytes(token);
+      const now = this.now();
+      const expiresAt = new Date(now.getTime() + input.expiresInSeconds * 1000);
+      const { rows } = await this.pool.query<ShrRow>(
+        `INSERT INTO shr (id, token_hash, object_type, object_id, relation,
+                          created_by, expires_at, single_use, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING ${SHR_COLS}`,
+        [
+          id,
+          tokenHash,
+          input.objectType,
+          objectIdToUuid(input.objectId),
+          input.relation,
+          createdByUuid,
+          expiresAt,
+          input.singleUse ?? false,
+          now,
+        ],
       );
-    }
-    const id = decode(generate("shr")).uuid;
-    const token = generateShareToken();
-    const tokenHash = hashTokenBytes(token);
-    const now = this.now();
-    const expiresAt = new Date(now.getTime() + input.expiresInSeconds * 1000);
-    const { rows } = await this.pool.query<ShrRow>(
-      `INSERT INTO shr (id, token_hash, object_type, object_id, relation,
-                        created_by, expires_at, single_use, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING ${SHR_COLS}`,
-      [
-        id,
-        tokenHash,
-        input.objectType,
-        objectIdToUuid(input.objectId),
-        input.relation,
-        createdByUuid,
-        expiresAt,
-        input.singleUse ?? false,
-        now,
-      ],
-    );
-    return { share: rowToShare(rows[0]!), token };
+      return { share: rowToShare(rows[0]!), token };
+    });
   }
 
   async getShare(id: ShrId): Promise<Share> {
@@ -543,17 +617,19 @@ export class PostgresShareStore implements ShareStore {
   }
 
   async revokeShare(id: ShrId): Promise<Share> {
-    const uuid = wireToUuid(id);
-    const { rows } = await this.pool.query<ShrRow>(
-      `UPDATE shr SET revoked_at = COALESCE(revoked_at, $2)
-       WHERE id = $1
-       RETURNING ${SHR_COLS}`,
-      [uuid, this.now()],
-    );
-    if (rows.length === 0) {
-      throw new ShareNotFoundError(`Share ${id} not found`);
-    }
-    return rowToShare(rows[0]!);
+    return this.nested(async () => {
+      const uuid = wireToUuid(id);
+      const { rows } = await this.pool.query<ShrRow>(
+        `UPDATE shr SET revoked_at = COALESCE(revoked_at, $2)
+         WHERE id = $1
+         RETURNING ${SHR_COLS}`,
+        [uuid, this.now()],
+      );
+      if (rows.length === 0) {
+        throw new ShareNotFoundError(`Share ${id} not found`);
+      }
+      return rowToShare(rows[0]!);
+    });
   }
 
   async listSharesForObject(

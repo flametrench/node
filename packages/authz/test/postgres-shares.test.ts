@@ -364,6 +364,102 @@ describe.skipIf(!hasPostgres)("PostgresShareStore", () => {
     expect(got.size).toBe(3);
     expect([...got].sort()).toEqual([...ids].sort());
   });
+
+  // ───── Outer-transaction nesting (ADR 0013) ─────
+
+  it("createShare cooperates with an outer transaction (no nested-BEGIN error)", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresShareStore(client);
+      const r = await nested.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: alice,
+        expiresInSeconds: 600,
+      });
+      await client.query("COMMIT");
+      const fetched = await store.getShare(r.share.id);
+      expect(fetched.id).toBe(r.share.id);
+    } finally {
+      client.release();
+    }
+  });
+
+  it("rolling back an outer transaction undoes the inner createShare", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresShareStore(client);
+      const r = await nested.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: alice,
+        expiresInSeconds: 600,
+      });
+      await client.query("ROLLBACK");
+      await expect(store.getShare(r.share.id)).rejects.toThrow(
+        ShareNotFoundError,
+      );
+    } finally {
+      client.release();
+    }
+  });
+
+  it("verifyShareToken cooperates with an outer transaction", async () => {
+    // Create the share outside, verify inside an outer transaction.
+    const r = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+    });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresShareStore(client);
+      const verified = await nested.verifyShareToken(r.token);
+      expect(verified.shareId).toBe(r.share.id);
+      await client.query("COMMIT");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("outer transaction can commit a second SDK call after first rolls back its savepoint (revoked share)", async () => {
+    const r = await store.createShare({
+      objectType: "proj",
+      objectId: project42,
+      relation: "viewer",
+      createdBy: alice,
+      expiresInSeconds: 600,
+    });
+    await store.revokeShare(r.share.id);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const nested = new PostgresShareStore(client);
+      await expect(nested.verifyShareToken(r.token)).rejects.toThrow(
+        ShareRevokedError,
+      );
+      // Outer txn still usable.
+      const r2 = await nested.createShare({
+        objectType: "proj",
+        objectId: project42,
+        relation: "viewer",
+        createdBy: alice,
+        expiresInSeconds: 600,
+      });
+      await client.query("COMMIT");
+      expect((await store.getShare(r2.share.id)).id).toBe(r2.share.id);
+    } finally {
+      client.release();
+    }
+  });
 });
 
 if (!hasPostgres) {
