@@ -77,14 +77,55 @@ export async function registerInvitationRoutes(
 
   app.post<{
     Params: { inv_id: InvId };
-    Body?: { as_usr_id?: UsrId };
+    Body?: { as_usr_id?: UsrId; accepting_identifier?: string };
   }>(
     "/invitations/:inv_id/accept",
     { onRequest: [auth] },
-    async (request) => {
+    async (request, reply) => {
+      const session = requireSession(request);
+      const asUsrId = request.body?.as_usr_id;
+      const acceptingIdentifier = request.body?.accepting_identifier;
+
+      // Mint-new-user path is unchanged — the SDK fabricates the usr_.
+      if (!asUsrId) {
+        return config.tenancyStore.acceptInvitation({
+          invId: request.params.inv_id,
+        });
+      }
+
+      // ADR 0009 authenticity check: the bearer MUST own the asserted
+      // user, and the bearer's user MUST own an active credential whose
+      // identifier byte-equals `accepting_identifier`. Without these, any
+      // caller could claim any identifier; the SDK only enforces byte
+      // equality, not source authenticity (see OpenAPI note on
+      // AcceptInvitationRequest).
+      if (asUsrId !== session.usrId) {
+        reply.code(403).send({
+          code: "forbidden.subject_mismatch",
+          message: "as_usr_id does not match the authenticated session",
+        });
+        return;
+      }
+      const creds = await config.identityStore.listCredentialsForUser(
+        session.usrId,
+      );
+      const ownsIdentifier = creds.some(
+        (c) =>
+          c.status === "active" && c.identifier === acceptingIdentifier,
+      );
+      if (!ownsIdentifier) {
+        reply.code(403).send({
+          code: "forbidden.identifier_unowned",
+          message:
+            "accepting_identifier is not bound to an active credential on the authenticated user",
+        });
+        return;
+      }
+
       return config.tenancyStore.acceptInvitation({
         invId: request.params.inv_id,
-        asUsrId: request.body?.as_usr_id,
+        asUsrId,
+        acceptingIdentifier,
       });
     },
   );

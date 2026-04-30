@@ -252,6 +252,7 @@ describe("@flametrench/server (integration via inject)", () => {
 
   describe("invitation flow", () => {
     it("end-to-end: create invitation, accept, see materialized membership", async () => {
+      // alice (signed in via the outer describe) invites carol@example.com.
       const createRes = await app.inject({
         method: "POST",
         url: "/v1/orgs",
@@ -271,19 +272,122 @@ describe("@flametrench/server (integration via inject)", () => {
       });
       expect(invRes.statusCode).toBe(201);
       const invId = invRes.json().id;
-      // Accept (we'll use a fresh user as the invitee).
-      const carol = await identityStore.createUser();
+
+      // carol signs up + signs in. She owns a credential whose identifier
+      // byte-matches the invitation — that's the ADR 0009 binding.
+      const carolSignup = await app.inject({ method: "POST", url: "/v1/users" });
+      const carolId = carolSignup.json().id;
+      await app.inject({
+        method: "POST",
+        url: "/v1/credentials",
+        payload: {
+          usr_id: carolId,
+          type: "password",
+          identifier: "carol@example.com",
+          password: "carol-password-long-enough",
+        },
+      });
+      const carolVerify = await app.inject({
+        method: "POST",
+        url: "/v1/credentials/verify",
+        payload: {
+          type: "password",
+          identifier: "carol@example.com",
+          proof: { password: "carol-password-long-enough" },
+        },
+      });
+      const carolSes = await app.inject({
+        method: "POST",
+        url: "/v1/sessions",
+        payload: {
+          usr_id: carolVerify.json().usr_id,
+          cred_id: carolVerify.json().cred_id,
+          ttl_seconds: 3600,
+        },
+      });
+      const carolBearer = carolSes.json().token;
+
       const acceptRes = await app.inject({
         method: "POST",
         url: `/v1/invitations/${invId}/accept`,
-        headers: { authorization: `Bearer ${session.token}` },
-        payload: { as_usr_id: carol.id },
+        headers: { authorization: `Bearer ${carolBearer}` },
+        payload: {
+          as_usr_id: carolId,
+          accepting_identifier: "carol@example.com",
+        },
       });
       expect(acceptRes.statusCode).toBe(200);
       const result = acceptRes.json();
       expect(result.invitation.status).toBe("accepted");
-      expect(result.membership.usrId).toBe(carol.id);
+      expect(result.membership.usrId).toBe(carolId);
       expect(result.membership.role).toBe("member");
+    });
+
+    it("rejects accept when accepting_identifier is not bound to the bearer", async () => {
+      // alice invites mallory@example.com.
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/v1/orgs",
+        headers: { authorization: `Bearer ${session.token}` },
+      });
+      const orgId = createRes.json().org.id;
+      const invRes = await app.inject({
+        method: "POST",
+        url: `/v1/orgs/${orgId}/invitations`,
+        headers: { authorization: `Bearer ${session.token}` },
+        payload: {
+          identifier: "mallory@example.com",
+          role: "member",
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+        },
+      });
+      const invId = invRes.json().id;
+
+      // dave signs in but DOESN'T own mallory@example.com — server must
+      // refuse to forward the claim to the SDK.
+      const daveSignup = await app.inject({ method: "POST", url: "/v1/users" });
+      const daveId = daveSignup.json().id;
+      await app.inject({
+        method: "POST",
+        url: "/v1/credentials",
+        payload: {
+          usr_id: daveId,
+          type: "password",
+          identifier: "dave@example.com",
+          password: "dave-password-long-enough",
+        },
+      });
+      const daveVerify = await app.inject({
+        method: "POST",
+        url: "/v1/credentials/verify",
+        payload: {
+          type: "password",
+          identifier: "dave@example.com",
+          proof: { password: "dave-password-long-enough" },
+        },
+      });
+      const daveSes = await app.inject({
+        method: "POST",
+        url: "/v1/sessions",
+        payload: {
+          usr_id: daveVerify.json().usr_id,
+          cred_id: daveVerify.json().cred_id,
+          ttl_seconds: 3600,
+        },
+      });
+      const daveBearer = daveSes.json().token;
+
+      const acceptRes = await app.inject({
+        method: "POST",
+        url: `/v1/invitations/${invId}/accept`,
+        headers: { authorization: `Bearer ${daveBearer}` },
+        payload: {
+          as_usr_id: daveId,
+          accepting_identifier: "mallory@example.com",
+        },
+      });
+      expect(acceptRes.statusCode).toBe(403);
+      expect(acceptRes.json().code).toBe("forbidden.identifier_unowned");
     });
   });
 
