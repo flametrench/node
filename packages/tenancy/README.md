@@ -2,7 +2,7 @@
 
 Tenancy primitives for [Flametrench](https://flametrench.dev): organizations, memberships, and invitations. Spec-conformant revoke-and-re-add lifecycle, atomic invitation acceptance, sole-owner protection, and an `mem_`/`tup_` duality that cannot drift.
 
-**Status:** v0.2.0-rc.6 (release candidate). Both the in-memory reference store and the production-ready `PostgresTenancyStore` ship in this package; the latter mirrors the in-memory semantics byte-for-byte at the SDK boundary with multi-statement atomicity for `createOrg`, `changeRole` revoke-and-re-add, `acceptInvitation` with pre-tuples, and `transferOwnership`. Per [ADR 0013](https://github.com/flametrench/spec/blob/main/decisions/0013-postgres-adapter-transaction-nesting.md) the constructor accepts a `pg.Pool` (standalone) or a `pg.PoolClient` (adopter-managed transaction); when caller-owned, `tx()` cooperates via `SAVEPOINT`/`RELEASE` instead of opening its own `BEGIN`.
+**Status:** v0.2.0 (stable). Both the in-memory reference store and the production-ready `PostgresTenancyStore` ship in this package; the latter mirrors the in-memory semantics byte-for-byte at the SDK boundary with multi-statement atomicity for `createOrg`, `changeRole` revoke-and-re-add, `acceptInvitation` with pre-tuples, and `transferOwnership`. Per [ADR 0013](https://github.com/flametrench/spec/blob/main/decisions/0013-postgres-adapter-transaction-nesting.md) the constructor accepts a `pg.Pool` (standalone) or a `pg.PoolClient` (adopter-managed transaction); when caller-owned, `tx()` cooperates via `SAVEPOINT`/`RELEASE` instead of opening its own `BEGIN`.
 
 ## Install
 

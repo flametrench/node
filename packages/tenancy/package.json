@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/tenancy",
-  "version": "0.2.0-rc.6",
+  "version": "0.2.0",
   "description": "Tenancy primitives for Flametrench: organizations, memberships, invitations. Spec-conformant revoke-and-re-add lifecycle and atomic invitation acceptance.",
   "license": "Apache-2.0",
   "author": {

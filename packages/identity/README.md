@@ -2,7 +2,7 @@
 
 Identity primitives for [Flametrench](https://flametrench.dev): users, credentials (password, passkey, OIDC), and user-bound sessions. Spec-conformant — Argon2id-pinned password hashing, revoke-and-re-add credential rotation, rotation-on-refresh sessions, and comprehensive cascade semantics. v0.2 adds first-class multi-factor authentication ([ADR 0008](https://github.com/flametrench/spec/blob/main/decisions/0008-mfa.md), [ADR 0010](https://github.com/flametrench/spec/blob/main/decisions/0010-webauthn-rs256-eddsa.md)) — TOTP (RFC 6238), recovery codes, and WebAuthn assertion verification across ES256 / RS256 / EdDSA.
 
-**Status:** v0.2.0-rc.7 (release candidate). Includes the production-ready `PostgresIdentityStore` alongside the in-memory reference store. Per ADR 0014 the `User` entity carries an optional `displayName` with a partial-update `updateUser` operation; per ADR 0015 `listUsers` provides cursor-paginated user enumeration with a credential-identifier substring filter. (rc.6 was a broken publish — `workspace:*` deps not resolved by `npm publish`; rc.7 is the same spec contract published via `pnpm publish`.)
+**Status:** v0.2.0 (stable). Includes the production-ready `PostgresIdentityStore` alongside the in-memory reference store. Per ADR 0014 the `User` entity carries an optional `displayName` with a partial-update `updateUser` operation; per ADR 0015 `listUsers` provides cursor-paginated user enumeration with a credential-identifier substring filter; per ADR 0013 the Postgres adapter cooperates with adopter-side outer transactions via savepoints when constructed with a `pg.PoolClient` (caller-owned).
 
 ## Install
 
