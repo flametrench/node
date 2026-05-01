@@ -10,6 +10,11 @@ Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/
 - Added a `prepack` script (`pnpm build`) so future publishes always rebuild fresh `dist/` before tarballing. The previous `prepublishOnly` only asserted pnpm was being used; it did not rebuild. Published packages will now always reflect the source they were tagged at.
 - Added a regression test (`test/dist-savepoint.test.ts`) that asserts the bundled `dist/` contains the savepoint cooperation markers, so any future build that fails to compile the code path fails CI before publish.
 
+## [v0.2.0] — 2026-04-30
+
+### Released
+- v0.2 stable cutoff. No functional changes from `v0.2.0-rc.5` — same source, version bumped to drop the `-rc` suffix at the spec v0.2.0 freeze. Published to npm `latest` dist-tag (replacing rc.7). **Note:** the v0.2.0 tarball shipped with stale built artifacts predating the ADR 0013 savepoint cooperation in source — see the v0.2.1 entry above. The `0.2.0` version remains on npm but consumers should pin `^0.2.1` for the savepoint code path.
+
 ## [v0.2.0-rc.5] — 2026-04-27
 
 ### Fixed (security posture)
