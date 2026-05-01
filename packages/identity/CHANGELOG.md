@@ -3,6 +3,13 @@
 All notable changes to `@flametrench/identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.2.1] — 2026-05-01
+
+### Fixed (release-process)
+- Republish to ship the ADR 0013 savepoint-cooperation code that has been in source since commit `ff0b826` ("ADR 0013 Node rollout") but was missing from the published `v0.2.0` tarball — the `dist/` directory tracked by `files: ["dist", ...]` was packed from a stale build. Without savepoint cooperation, `PostgresIdentityStore` constructed against a caller-owned `PoolClient` (e.g. inside an adopter's outer transaction) failed with `"Client has already been connected"` whenever a multi-statement method (e.g. `createSession`) tried to `pool.connect()`. After v0.2.1, all multi-statement methods cooperate via `SAVEPOINT`/`RELEASE` when the adapter detects it was given a `PoolClient`, falling back to `BEGIN`/`COMMIT` when given a `Pool`.
+- Added a `prepack` script (`pnpm build`) so future publishes always rebuild fresh `dist/` before tarballing. The previous `prepublishOnly` only asserted pnpm was being used; it did not rebuild. Published packages will now always reflect the source they were tagged at.
+- Added a regression test (`test/dist-savepoint.test.ts`) that asserts the bundled `dist/` contains the savepoint cooperation markers, so any future build that fails to compile the code path fails CI before publish.
+
 ## [v0.2.0-rc.5] — 2026-04-27
 
 ### Fixed (security posture)

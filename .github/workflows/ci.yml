@@ -38,15 +38,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
           cache: 'pnpm'
@@ -63,7 +61,13 @@ jobs:
         run: pnpm -r typecheck
 
       - name: Test (with coverage)
-        run: pnpm -r test --coverage --coverage.reporter=text --coverage.reporter=json-summary
+        # workspace-concurrency=1 serialises packages so identity, tenancy,
+        # and authz Postgres test suites don't race on the shared
+        # `flametrench_test` database (each suite TRUNCATEs / DROPs the
+        # public schema between tests). The `--` separator hands the
+        # remaining flags to vitest; pnpm itself doesn't recognise
+        # `--coverage`.
+        run: pnpm -r --workspace-concurrency=1 test -- --coverage --coverage.reporter=text --coverage.reporter=json-summary
 
       - name: Upload coverage artifacts
         if: matrix.node == '22'

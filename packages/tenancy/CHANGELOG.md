@@ -3,6 +3,13 @@
 All notable changes to `@flametrench/tenancy` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.2.1] — 2026-05-01
+
+### Fixed (release-process)
+- Republish to ship the ADR 0013 savepoint-cooperation code that has been in source since commit `ff0b826` ("ADR 0013 Node rollout") but was missing from the published `v0.2.0` tarball. Without savepoint cooperation, `PostgresTenancyStore` constructed against a caller-owned `PoolClient` failed with `"Client has already been connected"` whenever a multi-statement method (e.g. `createOrg`) tried to `pool.connect()`. After v0.2.1, all multi-statement methods cooperate via `SAVEPOINT`/`RELEASE` when the adapter detects it was given a `PoolClient`, falling back to `BEGIN`/`COMMIT` when given a `Pool`.
+- Added a `prepack` script (`pnpm build`) so future publishes always rebuild fresh `dist/` before tarballing.
+- Added a regression test (`test/dist-savepoint.test.ts`) that asserts the bundled `dist/` contains the savepoint cooperation markers.
+
 ## [v0.2.0-rc.5] — 2026-04-27
 
 ### Fixed
