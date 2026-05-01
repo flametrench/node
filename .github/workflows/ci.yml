@@ -61,7 +61,13 @@ jobs:
         run: pnpm -r typecheck
 
       - name: Test (with coverage)
-        run: pnpm -r test --coverage --coverage.reporter=text --coverage.reporter=json-summary
+        # workspace-concurrency=1 serialises packages so identity, tenancy,
+        # and authz Postgres test suites don't race on the shared
+        # `flametrench_test` database (each suite TRUNCATEs / DROPs the
+        # public schema between tests). The `--` separator hands the
+        # remaining flags to vitest; pnpm itself doesn't recognise
+        # `--coverage`.
+        run: pnpm -r --workspace-concurrency=1 test -- --coverage --coverage.reporter=text --coverage.reporter=json-summary
 
       - name: Upload coverage artifacts
         if: matrix.node == '22'
