@@ -3,6 +3,13 @@
 All notable changes to `@flametrench/authz` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.2.1] — 2026-05-01
+
+### Fixed (release-process)
+- Republish to ship the ADR 0013 savepoint-cooperation code that has been in source since commit `ff0b826` ("ADR 0013 Node rollout") but was missing from the published `v0.2.0` tarball. Both `PostgresTupleStore` and `PostgresShareStore` now cooperate with a caller-owned `PoolClient` via `SAVEPOINT`/`RELEASE` for multi-statement methods (e.g. share verification, single-use consumption), falling back to `BEGIN`/`COMMIT` when given a `Pool`.
+- Added a `prepack` script (`pnpm build`) so future publishes always rebuild fresh `dist/` before tarballing.
+- Added a regression test (`test/dist-savepoint.test.ts`) that asserts the bundled `dist/` contains the savepoint cooperation markers.
+
 ## [v0.2.0-rc.4] — 2026-04-27
 
 ### Fixed

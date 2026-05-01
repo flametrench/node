@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/tenancy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tenancy primitives for Flametrench: organizations, memberships, invitations. Spec-conformant revoke-and-re-add lifecycle and atomic invitation acceptance.",
   "license": "Apache-2.0",
   "author": {
@@ -71,6 +71,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build",
     "prepublishOnly": "node ../../scripts/assert-pnpm.mjs"
   }
 }

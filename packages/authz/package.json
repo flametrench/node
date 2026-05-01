@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/authz",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Authorization primitives for Flametrench: relational tuples and exact-match check(). Spec-conformant, no rewrite rules in v0.1.",
   "license": "Apache-2.0",
   "author": {
@@ -69,6 +69,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build",
     "prepublishOnly": "node ../../scripts/assert-pnpm.mjs"
   }
 }
