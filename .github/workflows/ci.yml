@@ -83,12 +83,12 @@ jobs:
 
     steps:
       - name: Checkout this monorepo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: sdk
 
       - name: Checkout flametrench/spec
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: flametrench/spec
           ref: main
@@ -106,14 +106,21 @@ jobs:
           fi
           echo "✅ All vendored ID fixtures match upstream."
 
-      - name: Verify vendored Postgres schema is byte-identical to upstream
+      - name: Verify vendored Postgres schemas are byte-identical to upstream
         run: |
           set -euo pipefail
-          SDK_SCHEMA=sdk/packages/tenancy/test/postgres-schema.sql
           SPEC_SCHEMA=spec/reference/postgres.sql
-          if ! diff -q "$SDK_SCHEMA" "$SPEC_SCHEMA"; then
-            echo "::error::Vendored Postgres schema has drifted from flametrench/spec/reference/postgres.sql."
-            echo "To resolve: cp spec/reference/postgres.sql packages/tenancy/test/postgres-schema.sql && commit."
+          drift=0
+          for pkg in identity tenancy authz; do
+            SDK_SCHEMA="sdk/packages/$pkg/test/postgres-schema.sql"
+            if ! diff -q "$SDK_SCHEMA" "$SPEC_SCHEMA" >/dev/null; then
+              echo "::error file=$SDK_SCHEMA::Vendored Postgres schema for @flametrench/$pkg has drifted from flametrench/spec/reference/postgres.sql."
+              diff "$SDK_SCHEMA" "$SPEC_SCHEMA" | head -20 || true
+              drift=1
+            fi
+          done
+          if [ "$drift" -ne 0 ]; then
+            echo "To resolve: cp spec/reference/postgres.sql packages/<pkg>/test/postgres-schema.sql && commit (for each drifting package)."
             exit 1
           fi
-          echo "✅ Vendored Postgres schema matches upstream."
+          echo "✅ All vendored Postgres schemas (identity, tenancy, authz) match upstream."
