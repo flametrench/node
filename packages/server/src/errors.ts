@@ -8,11 +8,21 @@ import {
   DuplicateCredentialError,
   IdentityError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError as IdentityNotFound,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError as IdentityPrecondition,
   SessionExpiredError,
 } from "@flametrench/identity";
+import {
+  InvalidShareTokenError,
+  ShareConsumedError,
+  ShareExpiredError,
+  ShareRevokedError,
+} from "@flametrench/authz";
+import { TokenFormatUnrecognizedError } from "./resolve-bearer.js";
 import {
   AlreadyTerminalError as TenancyAlreadyTerminal,
   DuplicateMembershipError,
@@ -59,7 +69,24 @@ export function mapErrorToResponse(
   }
 
   // ─── 401 Unauthenticated ───
-  if (err instanceof InvalidCredentialError || err instanceof InvalidTokenError || err instanceof SessionExpiredError) {
+  if (
+    err instanceof InvalidCredentialError ||
+    err instanceof InvalidTokenError ||
+    err instanceof SessionExpiredError ||
+    // v0.3 PAT bearer rejections (security-audit H5).
+    err instanceof InvalidPatTokenError ||
+    err instanceof PatExpiredError ||
+    err instanceof PatRevokedError ||
+    // v0.3 share bearer rejections (already shipped in v0.2 but
+    // weren't routed through this map until H5 wired them in).
+    err instanceof InvalidShareTokenError ||
+    err instanceof ShareExpiredError ||
+    err instanceof ShareRevokedError ||
+    err instanceof ShareConsumedError ||
+    // Bearer prefix didn't match any wired verifier (e.g. shr_ with
+    // no shareStore wired). Per ADR 0016 §"Bearer routing".
+    err instanceof TokenFormatUnrecognizedError
+  ) {
     return { status: 401, envelope: errEnv(err) };
   }
 

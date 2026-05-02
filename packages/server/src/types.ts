@@ -1,8 +1,8 @@
 // Copyright 2026 NDC Digital, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-import type { TupleStore } from "@flametrench/authz";
-import type { IdentityStore, Session } from "@flametrench/identity";
+import type { TupleStore, VerifiedShare } from "@flametrench/authz";
+import type { IdentityStore, Session, VerifiedPat } from "@flametrench/identity";
 import type { TenancyStore } from "@flametrench/tenancy";
 
 /** Configuration for `createFlametrenchServer`. */
@@ -32,5 +32,13 @@ export interface FlametrenchServerConfig {
 declare module "fastify" {
   interface FastifyRequest {
     flametrenchSession?: Session;
+    /** v0.3 — set by the bearer-auth hook for `pat_…` bearers. */
+    flametrenchPat?: VerifiedPat;
+    /**
+     * v0.3 — set by the bearer-auth hook for `shr_…` bearers
+     * when a shareStore is wired. Mutually exclusive with the
+     * other two fields on a successful auth.
+     */
+    flametrenchShare?: VerifiedShare;
   }
 }
