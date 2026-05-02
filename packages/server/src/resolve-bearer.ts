@@ -116,6 +116,18 @@ export async function resolveBearer(
   stores: ResolveBearerStores,
 ): Promise<ResolvedBearer> {
   if (token.startsWith("pat_")) {
+    // security-audit-v0.3.md M8: parallel-guard the PAT branch
+    // against a missing verifier. TypeScript catches this at compile
+    // time when `identityStore` is typed as
+    // `Pick<IdentityStore, "verifySessionToken" | "verifyPatToken">`,
+    // but adopters in untyped JS or composing partial stores at
+    // runtime can lose the guarantee. Mirrors the share branch's
+    // guard for consistency.
+    if (typeof stores.identityStore.verifyPatToken !== "function") {
+      throw new TokenFormatUnrecognizedError(
+        "PAT bearer presented but identityStore.verifyPatToken is not wired",
+      );
+    }
     const verified = await stores.identityStore.verifyPatToken(token);
     return { kind: "pat", verified };
   }
