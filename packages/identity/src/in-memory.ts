@@ -21,7 +21,11 @@ import {
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
-import { PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
+import {
+  PAT_DUMMY_PHC_HASH,
+  PAT_MAX_LIFETIME_SECONDS,
+  PAT_MAX_SECRET_LENGTH,
+} from "./pat.js";
 import type {
   CreatePatInput,
   CreatePatResult,
@@ -1253,7 +1257,11 @@ export class InMemoryIdentityStore implements IdentityStore {
       throw new InvalidPatTokenError();
     }
     const secretSegment = token.slice(37);
-    if (secretSegment.length === 0) {
+    // security-audit-v0.3.md H6: cap on secret-segment length so an
+    // attacker with a known pat_id cannot force unbounded Argon2id
+    // work by submitting MB-sized secrets. Real PAT secrets are 43
+    // chars (32 random bytes base64url-encoded); 256 is generous.
+    if (secretSegment.length === 0 || secretSegment.length > PAT_MAX_SECRET_LENGTH) {
       throw new InvalidPatTokenError();
     }
     const patId = `pat_${idHex}` as PatId;

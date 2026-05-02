@@ -50,7 +50,11 @@ import {
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
-import { PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
+import {
+  PAT_DUMMY_PHC_HASH,
+  PAT_MAX_LIFETIME_SECONDS,
+  PAT_MAX_SECRET_LENGTH,
+} from "./pat.js";
 import type {
   CreatePatInput,
   CreatePatResult,
@@ -1762,7 +1766,11 @@ export class PostgresIdentityStore implements IdentityStore {
     if (!/^[0-9a-f]{32}$/.test(idHex)) throw new InvalidPatTokenError();
     if (token[36] !== "_") throw new InvalidPatTokenError();
     const secretSegment = token.slice(37);
-    if (secretSegment.length === 0) throw new InvalidPatTokenError();
+    // security-audit-v0.3.md H6: cap on secret-segment length —
+    // see in-memory.ts for rationale. Reject before Argon2id dispatch.
+    if (secretSegment.length === 0 || secretSegment.length > PAT_MAX_SECRET_LENGTH) {
+      throw new InvalidPatTokenError();
+    }
     const patId = `pat_${idHex}` as PatId;
 
     // Step 3: lookup. wireToUuid may throw if the structurally-valid
