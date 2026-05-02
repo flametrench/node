@@ -370,22 +370,53 @@ export class PostgresTupleStore implements TupleStore {
     if (this.rules === null) {
       return { allowed: false, matchedTupleId: null };
     }
-    const result = await evaluate({
-      rules: this.rules,
-      subjectType: input.subjectType,
-      subjectId: input.subjectId,
-      relation: input.relation,
-      objectType: input.objectType,
-      objectId: input.objectId,
-      directLookup: this.directLookup,
-      listByObject: this.listByObject,
-      maxDepth: this.maxDepth,
-      maxFanOut: this.maxFanOut,
+    // security-audit-v0.3.md M1: pin a single PoolClient for the entire
+    // rule-eval recursion. Pre-fix every directLookup / listByObject hop
+    // checked out a fresh pool client (or shared one but didn't
+    // guarantee it), so a deep tuple_to_userset chain under load could
+    // fan pool checkouts across one logical check. Bound to one
+    // connection now; read-skew is still possible under concurrent
+    // writers (documented as a v0.3 limitation in ADR 0017).
+    const result = await this.withClient(async (client) => {
+      return evaluate({
+        rules: this.rules!,
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        relation: input.relation,
+        objectType: input.objectType,
+        objectId: input.objectId,
+        directLookup: (st, si, r, ot, oi) =>
+          this.directLookupOn(client, st, si, r, ot, oi),
+        listByObject: (ot, oi, r) => this.listByObjectOn(client, ot, oi, r),
+        maxDepth: this.maxDepth,
+        maxFanOut: this.maxFanOut,
+      });
     });
     return {
       allowed: result.allowed,
       matchedTupleId: result.matchedTupleId as TupId | null,
     };
+  }
+
+  /**
+   * security-audit-v0.3.md M1: acquire a single PoolClient for a
+   * read-only multi-statement run, releasing on return / throw. When
+   * already inside a caller-owned transaction (`this.pool` is a
+   * PoolClient), reuse that client directly — no new checkout, no
+   * release.
+   */
+  private async withClient<T>(
+    fn: (client: PoolClient | Pool) => Promise<T>,
+  ): Promise<T> {
+    if (clientIsCallerOwned(this.pool)) {
+      return fn(this.pool as PoolClient);
+    }
+    const c = await (this.pool as Pool).connect();
+    try {
+      return await fn(c);
+    } finally {
+      c.release();
+    }
   }
 
   async checkAny(input: CheckSetInput): Promise<CheckResult> {
@@ -431,15 +462,31 @@ export class PostgresTupleStore implements TupleStore {
     return { allowed: false, matchedTupleId: null };
   }
 
-  /** Direct natural-key lookup against Postgres. Used by the rule evaluator. */
-  private directLookup = async (
+  /** Direct natural-key lookup. v0.1 fast path (uses pool auto-acquire). */
+  private directLookup = (
     subjectType: string,
     subjectId: string,
     relation: string,
     objectType: string,
     objectId: string,
-  ): Promise<string | null> => {
-    const { rows } = await this.pool.query<{ id: string }>(
+  ): Promise<string | null> =>
+    this.directLookupOn(this.pool, subjectType, subjectId, relation, objectType, objectId);
+
+  /**
+   * security-audit-v0.3.md M1 — direct lookup against an explicit
+   * client. Rule-eval recursion calls this with a single PoolClient
+   * pinned for the whole evaluate(), so deep tuple_to_userset chains
+   * don't fan pool checkouts across one check.
+   */
+  private async directLookupOn(
+    client: PoolClient | Pool,
+    subjectType: string,
+    subjectId: string,
+    relation: string,
+    objectType: string,
+    objectId: string,
+  ): Promise<string | null> {
+    const { rows } = await client.query<{ id: string }>(
       `SELECT id FROM tup
        WHERE subject_type = $1 AND subject_id = $2
          AND relation = $3 AND object_type = $4 AND object_id = $5
@@ -453,7 +500,7 @@ export class PostgresTupleStore implements TupleStore {
       ],
     );
     return rows.length > 0 ? (encode("tup", rows[0]!.id) as string) : null;
-  };
+  }
 
   /**
    * Enumerate tuples on (object, relation). Used by tuple_to_userset.
@@ -463,11 +510,12 @@ export class PostgresTupleStore implements TupleStore {
    * The evaluator passes the value through as the next-hop objectId,
    * which `objectIdToUuid` then accepts.
    */
-  private listByObject = async (
+  private async listByObjectOn(
+    client: PoolClient | Pool,
     objectType: string,
     objectId: string,
     relation: string | null,
-  ): Promise<{ subjectType: string; subjectId: string; tupId: string }[]> => {
+  ): Promise<{ subjectType: string; subjectId: string; tupId: string }[]> {
     const objectUuid = objectIdToUuid(objectId);
     const params: unknown[] = [objectType, objectUuid];
     let sql = `SELECT id, subject_type, subject_id FROM tup
@@ -476,7 +524,7 @@ export class PostgresTupleStore implements TupleStore {
       sql += ` AND relation = $3`;
       params.push(relation);
     }
-    const { rows } = await this.pool.query<TupRow>(sql, params);
+    const { rows } = await client.query<TupRow>(sql, params);
     return rows.map((r) => ({
       subjectType: r.subject_type,
       // pg returns UUID columns as canonical hyphenated strings; the
@@ -484,7 +532,7 @@ export class PostgresTupleStore implements TupleStore {
       subjectId: `${r.subject_type}_${uuidHyphensToBare(r.subject_id)}`,
       tupId: encode("tup", r.id),
     }));
-  };
+  }
 
   // ─── Read accessors ───
 
