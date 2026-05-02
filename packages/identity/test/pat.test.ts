@@ -88,6 +88,28 @@ describe("InMemoryIdentityStore — personal access tokens (ADR 0016)", () => {
       ).rejects.toThrow(PreconditionError);
     });
 
+    // security-audit-v0.3.md H1: ADR 0016 §"Constraints" caps expires_at
+    // at 365 days from creation. Pre-fix this was unenforced.
+    it("accepts expires_at exactly 365 days out (cap inclusive)", async () => {
+      const u = await store.createUser();
+      const exp = new Date(now.getTime() + 365 * 86400 * 1000);
+      const r = await store.createPat({
+        usrId: u.id,
+        name: "cli",
+        scope: [],
+        expiresAt: exp,
+      });
+      expect(r.pat.expiresAt?.toISOString()).toBe(exp.toISOString());
+    });
+
+    it("rejects expires_at beyond the 365-day cap", async () => {
+      const u = await store.createUser();
+      const exp = new Date(now.getTime() + 365 * 86400 * 1000 + 1000); // +1 second past cap
+      await expect(
+        store.createPat({ usrId: u.id, name: "cli", scope: [], expiresAt: exp }),
+      ).rejects.toThrow(PreconditionError);
+    });
+
     it("refuses to issue PATs for revoked users", async () => {
       const u = await store.createUser();
       await store.revokeUser(u.id);

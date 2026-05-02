@@ -126,3 +126,10 @@ const PAT_WIRE_FORMAT = /^pat_[0-9a-f]{32}_[A-Za-z0-9_-]+$/;
 export function isStructurallyValidPatToken(token: string): boolean {
   return PAT_WIRE_FORMAT.test(token);
 }
+
+/**
+ * Spec floor: PAT `expiresAt` MUST be no more than 365 days from
+ * `createdAt` when set (ADR 0016 §"Constraints"). Implementations MAY
+ * enforce a tighter cap. 365 days = 31,536,000 seconds.
+ */
+export const PAT_MAX_LIFETIME_SECONDS = 365 * 24 * 60 * 60;

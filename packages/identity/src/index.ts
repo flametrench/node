@@ -121,7 +121,7 @@ export type {
   PersonalAccessToken,
   VerifiedPat,
 } from "./pat.js";
-export { isStructurallyValidPatToken } from "./pat.js";
+export { isStructurallyValidPatToken, PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
 
 // v0.2 — WebAuthn assertion verification (Proposed; ADR 0008)
 export {

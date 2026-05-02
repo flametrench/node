@@ -50,6 +50,7 @@ import {
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
+import { PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
 import type {
   CreatePatInput,
   CreatePatResult,
@@ -1640,6 +1641,16 @@ export class PostgresIdentityStore implements IdentityStore {
         throw new PreconditionError(
           "PAT expires_at must be strictly in the future",
           "pat.expires_in_past",
+        );
+      }
+      // security-audit-v0.3.md H1: 365-day cap from ADR 0016 §"Constraints".
+      if (
+        input.expiresAt != null &&
+        input.expiresAt.getTime() - now.getTime() > PAT_MAX_LIFETIME_SECONDS * 1000
+      ) {
+        throw new PreconditionError(
+          `PAT expires_at exceeds the spec cap of ${PAT_MAX_LIFETIME_SECONDS} seconds (365 days) from creation`,
+          "pat.expires_too_far",
         );
       }
       const patWireId = generate("pat") as PatId;
