@@ -22,12 +22,18 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  isStructurallyValidPatToken,
   isValidRecoveryCode,
   totpCompute,
   verifyPasswordHash,
   WebAuthnError,
   webauthnVerifyAssertion,
 } from "../src/index.js";
+// classifyBearer lives in @flametrench/server (it composes identity +
+// authz stores) but is the canonical implementation of the bearer-
+// prefix dispatcher per ADR 0016. Import via relative path since this
+// is the identity package's conformance test.
+import { classifyBearer } from "../../server/src/resolve-bearer.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(__dirname, "conformance/fixtures");
@@ -184,6 +190,40 @@ for (const path of [
         it(`[${t.id}] ${t.description}`, () => {
           const actual = runWebauthn(shared, t);
           expect(actual).toEqual(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.3: identity.verify_pat_token (structural validation) ───
+
+{
+  const fixture = loadFixture("identity/pat/token-format.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · structural`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { token: string };
+          expect(isStructurallyValidPatToken(input.token)).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.3: identity.resolve_bearer (auth.kind classifier) ───
+
+{
+  const fixture = loadFixture("identity/pat/bearer-prefix-routing.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · auth.kind`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { token: string };
+          expect(classifyBearer(input.token)).toBe(t.expected.result);
         });
       }
     },

@@ -20,6 +20,7 @@ export { buildBearerAuthHook, requireSession } from "./auth.js";
 export {
   TOKEN_FORMAT_UNRECOGNIZED_CODE,
   TokenFormatUnrecognizedError,
+  classifyBearer,
   resolveBearer,
 } from "./resolve-bearer.js";
 export type {

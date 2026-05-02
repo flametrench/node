@@ -74,6 +74,25 @@ export interface ResolveBearerStores {
 }
 
 /**
+ * Pure prefix classifier. Returns the `auth.kind` discriminator value
+ * for the candidate token without invoking any verifier or hitting
+ * any store. The cross-SDK conformance contract — see
+ * `spec/conformance/fixtures/identity/pat/bearer-prefix-routing.json`
+ * — pins the classification rules every conforming SDK MUST produce
+ * identically.
+ *
+ * Used by {@link resolveBearer} internally; exposed as a public helper
+ * for adopters who need to populate `auth.kind` in audit records
+ * before the verifier runs (e.g., logging the classification of a
+ * token that subsequently fails verification).
+ */
+export function classifyBearer(token: string): "pat" | "share" | "session" {
+  if (token.startsWith("pat_")) return "pat";
+  if (token.startsWith("shr_")) return "share";
+  return "session";
+}
+
+/**
  * Inspect the token prefix and dispatch to the matching verifier.
  *
  * Routing:

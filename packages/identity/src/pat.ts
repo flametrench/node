@@ -106,3 +106,23 @@ export interface ListPatsForUserOptions {
   /** Filter by derived PAT status. */
   status?: PatStatus;
 }
+
+/**
+ * Pure structural validator for the PAT bearer wire format. Returns
+ * {@code true} iff the input matches `pat_<32hex>_<base64url-secret>`
+ * (lowercase hex, exactly 32 chars; non-empty base64url secret).
+ *
+ * Performs NO database hit; suitable for fast pre-rejection in
+ * middleware, and used by the cross-SDK conformance fixture
+ * `spec/conformance/fixtures/identity/pat/token-format.json`.
+ *
+ * Note: a token that passes this check may still fail at the lookup
+ * or Argon2id verify step. Conversely, every conforming SDK MUST
+ * reject tokens that fail this check before any DB hit — both for
+ * performance and for the timing-oracle guarantee from ADR 0016
+ * §"Verification semantics".
+ */
+const PAT_WIRE_FORMAT = /^pat_[0-9a-f]{32}_[A-Za-z0-9_-]+$/;
+export function isStructurallyValidPatToken(token: string): boolean {
+  return PAT_WIRE_FORMAT.test(token);
+}
