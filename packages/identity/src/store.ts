@@ -13,6 +13,14 @@ import type {
   WebAuthnFactor,
 } from "./mfa.js";
 import type {
+  CreatePatInput,
+  CreatePatResult,
+  ListPatsForUserOptions,
+  PatId,
+  PersonalAccessToken,
+  VerifiedPat,
+} from "./pat.js";
+import type {
   CreateCredentialInput,
   CreateSessionInput,
   CreateSessionResult,
@@ -128,6 +136,50 @@ export interface IdentityStore {
   /** Returns null when the user has no policy row. */
   getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null>;
   setMfaPolicy(input: SetMfaPolicyInput): Promise<UserMfaPolicy>;
+
+  // ─── v0.3 personal access tokens (ADR 0016) ───
+
+  /**
+   * Mint a new PAT bound to the user. Returns the persisted record and
+   * the plaintext bearer token in `pat_<32hex>_<base64url>` form. The
+   * plaintext token is returned ONCE; the server stores only an
+   * Argon2id hash of the secret segment at the cred-password
+   * parameter floor.
+   *
+   * Authorization gating is the adopter's responsibility — typically
+   * "the requesting principal owns input.usrId, OR is a sysadmin
+   * acting on the user's behalf." The SDK does not enforce.
+   */
+  createPat(input: CreatePatInput): Promise<CreatePatResult>;
+
+  getPat(patId: PatId): Promise<PersonalAccessToken>;
+
+  /** Cursor-paginated PAT list for a user. Mirrors `listMembers`. */
+  listPatsForUser(
+    usrId: UsrId,
+    options?: ListPatsForUserOptions,
+  ): Promise<Page<PersonalAccessToken>>;
+
+  /**
+   * Terminal-state revoke. Idempotent: revoking an already-revoked
+   * PAT returns the existing row.
+   */
+  revokePat(patId: PatId): Promise<PersonalAccessToken>;
+
+  /**
+   * Verify a PAT bearer token per ADR 0016 §"Verification semantics".
+   *
+   * Throws InvalidPatTokenError for malformed tokens, missing rows,
+   * or wrong-secret matches (the missing/wrong cases MUST conflate to
+   * defend against a token-presence timing oracle). Throws
+   * PatRevokedError for terminal-revoked tokens. Throws
+   * PatExpiredError for past-expiry tokens.
+   *
+   * On success, side-effect: updates `lastUsedAt`. Implementations MAY
+   * coalesce these writes within a configurable window (60s default)
+   * to avoid a write-per-request hot path.
+   */
+  verifyPatToken(token: string): Promise<VerifiedPat>;
 }
 
 export interface EnrollWebAuthnFactorInput {

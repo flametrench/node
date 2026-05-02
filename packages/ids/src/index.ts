@@ -28,6 +28,8 @@ export const TYPES = {
   mfa: "mfa_factor",
   // v0.2 — Proposed (ADR 0012)
   shr: "share_token",
+  // v0.3 — Proposed (ADR 0016)
+  pat: "personal_access_token",
 } as const satisfies Record<string, string>;
 
 export type IdType = keyof typeof TYPES;

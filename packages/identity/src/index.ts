@@ -102,11 +102,25 @@ export {
   DuplicateCredentialError,
   IdentityError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
+
+// v0.3 — Personal access tokens (Proposed; ADR 0016)
+export type {
+  CreatePatInput,
+  CreatePatResult,
+  ListPatsForUserOptions,
+  PatId,
+  PatStatus,
+  PersonalAccessToken,
+  VerifiedPat,
+} from "./pat.js";
 
 // v0.2 — WebAuthn assertion verification (Proposed; ADR 0008)
 export {

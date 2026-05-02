@@ -89,3 +89,39 @@ export class CredentialTypeMismatchError extends IdentityError {
     this.name = "CredentialTypeMismatchError";
   }
 }
+
+/**
+ * Raised by `verifyPatToken` when the bearer is malformed, references a
+ * non-existent PAT row, OR carries the wrong secret (ADR 0016). The "no
+ * such row" and "wrong secret" cases MUST conflate to this single error
+ * class with an identical message — distinguishable errors leak
+ * token-presence as a timing oracle.
+ */
+export class InvalidPatTokenError extends IdentityError {
+  constructor(message: string = "invalid personal access token") {
+    super(message, "pat.invalid");
+    this.name = "InvalidPatTokenError";
+  }
+}
+
+/**
+ * Raised by `verifyPatToken` when the PAT row exists, has not been
+ * revoked, but is past its `expiresAt` (ADR 0016).
+ */
+export class PatExpiredError extends IdentityError {
+  constructor(patId: string) {
+    super(`personal access token ${patId} is expired`, "pat.expired");
+    this.name = "PatExpiredError";
+  }
+}
+
+/**
+ * Raised by `verifyPatToken` when the PAT row exists but has been
+ * explicitly revoked via `revokePat` (ADR 0016). Terminal.
+ */
+export class PatRevokedError extends IdentityError {
+  constructor(patId: string) {
+    super(`personal access token ${patId} is revoked`, "pat.revoked");
+    this.name = "PatRevokedError";
+  }
+}

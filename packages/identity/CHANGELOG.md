@@ -3,6 +3,24 @@
 All notable changes to `@flametrench/identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.3.0] — Unreleased
+
+### Added (personal access tokens, ADR 0016)
+- New PAT primitive shared across both stores. Surface:
+  - Types: `PersonalAccessToken`, `PatStatus`, `VerifiedPat`, `PatId`, `CreatePatInput`, `CreatePatResult`, `ListPatsForUserOptions`.
+  - Errors: `InvalidPatTokenError`, `PatExpiredError`, `PatRevokedError`. The "no such row" and "wrong secret" cases conflate to `InvalidPatTokenError` to defend against a token-presence timing oracle (ADR 0016 §"Verification semantics").
+  - Methods on `IdentityStore`: `createPat`, `getPat`, `listPatsForUser`, `revokePat`, `verifyPatToken`. Implemented in both `InMemoryIdentityStore` and `PostgresIdentityStore`.
+- Wire format: `pat_<32hex-id>_<base64url-secret>` (Stripe-style id-then-secret). The plaintext token is returned ONCE in `createPat` and never again — the server stores only an Argon2id hash of the secret segment at the cred-password parameter floor (m=19456, t=2, p=1).
+- New `patLastUsedCoalesceSeconds` constructor option on both stores (default 60s) avoids a write-per-request hot path on the `lastUsedAt` column. 0 disables coalescing.
+- `PostgresIdentityStore` PAT methods cooperate with caller-owned `PoolClient` via `SAVEPOINT/RELEASE` (ADR 0013) — adopters wrapping multiple SDK calls in one outer transaction work as expected.
+- 35 new tests: 21 in-memory + 14 Postgres integration, including SAVEPOINT cooperation and partial-failure rollback.
+
+### Required dependency bump
+- `@flametrench/ids` constraint now `^0.3.0` for the `pat` type prefix (ADR 0016).
+
+### Test infrastructure
+- `vitest.config.ts` adds `fileParallelism: false` — Postgres integration test files all DROP SCHEMA in `beforeEach` against the same database, so running files in parallel races on schema state. Made visible by the new PAT integration tests.
+
 ## [v0.2.1] — 2026-05-01
 
 ### Fixed (release-process)

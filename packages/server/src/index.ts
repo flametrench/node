@@ -15,3 +15,14 @@ export { createFlametrenchServer } from "./app.js";
 export type { FlametrenchServerConfig } from "./types.js";
 export { mapErrorToResponse, type ErrorEnvelope } from "./errors.js";
 export { buildBearerAuthHook, requireSession } from "./auth.js";
+
+// v0.3 — Bearer prefix dispatch for sessions / PATs / shares (ADR 0016).
+export {
+  TOKEN_FORMAT_UNRECOGNIZED_CODE,
+  TokenFormatUnrecognizedError,
+  resolveBearer,
+} from "./resolve-bearer.js";
+export type {
+  ResolveBearerStores,
+  ResolvedBearer,
+} from "./resolve-bearer.js";

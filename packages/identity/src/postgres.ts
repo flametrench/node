@@ -41,12 +41,24 @@ import {
   CredentialTypeMismatchError,
   DuplicateCredentialError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
+import type {
+  CreatePatInput,
+  CreatePatResult,
+  ListPatsForUserOptions,
+  PatId,
+  PatStatus,
+  PersonalAccessToken,
+  VerifiedPat,
+} from "./pat.js";
 import {
   DEFAULT_TOTP_ALGORITHM,
   DEFAULT_TOTP_DIGITS,
@@ -318,8 +330,34 @@ const MFA_COLS =
   "recovery_hashes, recovery_consumed, pending_expires_at, " +
   "created_at, updated_at";
 
+const PAT_COLS =
+  "id, usr_id, name, scope, secret_hash, expires_at, last_used_at, " +
+  "revoked_at, created_at, updated_at";
+
+interface PatRow {
+  id: string;
+  usr_id: string;
+  name: string;
+  scope: string[] | null;
+  secret_hash: string;
+  expires_at: Date | null;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 function wireToUuid(wireId: string): string {
   return decode(wireId).uuid;
+}
+
+/** RFC 4648 §5 base64url, no padding. Matches the spec wire format. */
+function base64UrlEncode(buf: Uint8Array): string {
+  return Buffer.from(buf)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 function hashTokenBytes(token: string): Buffer {
@@ -350,6 +388,13 @@ function isUniqueViolation(err: unknown): boolean {
 export interface PostgresIdentityStoreOptions {
   /** Override the clock for deterministic tests. */
   clock?: () => Date;
+  /**
+   * Coalescing window for `lastUsedAt` writes on `verifyPatToken` per
+   * ADR 0016 §"Operational notes". Within this window, repeat verifies
+   * of the same PAT do NOT issue an UPDATE. 0 disables coalescing.
+   * Default 60 seconds.
+   */
+  patLastUsedCoalesceSeconds?: number;
 }
 
 /**
@@ -372,12 +417,17 @@ export class PostgresIdentityStore implements IdentityStore {
   static readonly PENDING_FACTOR_TTL_SECONDS = 600;
 
   private readonly clock: () => Date;
+  private readonly patLastUsedCoalesceSeconds: number;
 
   constructor(
     private readonly pool: PostgresIdentityClient,
     options: PostgresIdentityStoreOptions = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
+    this.patLastUsedCoalesceSeconds = Math.max(
+      0,
+      options.patLastUsedCoalesceSeconds ?? 60,
+    );
   }
 
   private now(): Date {
@@ -1560,6 +1610,222 @@ export class PostgresIdentityStore implements IdentityStore {
       [userUuid, input.required, input.graceUntil ?? null],
     );
     return rowToPolicy(rows[0]!);
+  }
+
+  // ─── v0.3 personal access tokens (ADR 0016) ───
+
+  async createPat(input: CreatePatInput): Promise<CreatePatResult> {
+    return this.tx(async (c) => {
+      const userUuid = wireToUuid(input.usrId);
+      const userRes = await c.query<{ status: string }>(
+        `SELECT status FROM usr WHERE id = $1 FOR UPDATE`,
+        [userUuid],
+      );
+      if (userRes.rows.length === 0) {
+        throw new NotFoundError(`User ${input.usrId} not found`);
+      }
+      if (userRes.rows[0]!.status === "revoked") {
+        throw new AlreadyTerminalError(
+          `User ${input.usrId} is revoked; cannot issue PATs`,
+        );
+      }
+      if (input.name.length < 1 || input.name.length > 120) {
+        throw new PreconditionError(
+          `PAT name must be 1–120 characters (got ${input.name.length})`,
+          "pat.name_invalid",
+        );
+      }
+      const now = this.now();
+      if (input.expiresAt != null && input.expiresAt <= now) {
+        throw new PreconditionError(
+          "PAT expires_at must be strictly in the future",
+          "pat.expires_in_past",
+        );
+      }
+      const patWireId = generate("pat") as PatId;
+      const patUuid = wireToUuid(patWireId);
+      const idHexSegment = patWireId.slice(4);
+      const secretBytes = randomBytes(32);
+      const secretSegment = base64UrlEncode(secretBytes);
+      const token = `pat_${idHexSegment}_${secretSegment}`;
+      const secretHash = await hashPassword(secretSegment);
+
+      const insertRes = await c.query<PatRow>(
+        `INSERT INTO pat (id, usr_id, name, scope, secret_hash, expires_at,
+                          last_used_at, revoked_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $7)
+         RETURNING ${PAT_COLS}`,
+        [
+          patUuid,
+          userUuid,
+          input.name,
+          input.scope,
+          secretHash,
+          input.expiresAt ?? null,
+          now,
+        ],
+      );
+      return {
+        pat: this.rowToPat(insertRes.rows[0]!),
+        token,
+      };
+    });
+  }
+
+  async getPat(patId: PatId): Promise<PersonalAccessToken> {
+    const res = await this.pool.query<PatRow>(
+      `SELECT ${PAT_COLS} FROM pat WHERE id = $1`,
+      [wireToUuid(patId)],
+    );
+    if (res.rows.length === 0) {
+      throw new NotFoundError(`PAT ${patId} not found`);
+    }
+    return this.rowToPat(res.rows[0]!);
+  }
+
+  async listPatsForUser(
+    usrId: UsrId,
+    options: ListPatsForUserOptions = {},
+  ): Promise<Page<PersonalAccessToken>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const params: unknown[] = [wireToUuid(usrId)];
+    let sql = `SELECT ${PAT_COLS} FROM pat WHERE usr_id = $1`;
+    if (options.cursor != null) {
+      params.push(wireToUuid(options.cursor as PatId));
+      sql += ` AND id > $${params.length}`;
+    }
+    if (options.status != null) {
+      const now = this.now();
+      switch (options.status) {
+        case "revoked":
+          sql += ` AND revoked_at IS NOT NULL`;
+          break;
+        case "expired":
+          params.push(now);
+          sql += ` AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at <= $${params.length}`;
+          break;
+        case "active":
+          params.push(now);
+          sql += ` AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $${params.length})`;
+          break;
+      }
+    }
+    params.push(limit + 1);
+    sql += ` ORDER BY id ASC LIMIT $${params.length}`;
+    const res = await this.pool.query<PatRow>(sql, params);
+    const hasMore = res.rows.length > limit;
+    const rows = hasMore ? res.rows.slice(0, limit) : res.rows;
+    const data = rows.map((r) => this.rowToPat(r));
+    const nextCursor = hasMore && data.length > 0 ? data[data.length - 1]!.id : null;
+    return { data, nextCursor };
+  }
+
+  async revokePat(patId: PatId): Promise<PersonalAccessToken> {
+    return this.tx(async (c) => {
+      const lock = await c.query<PatRow>(
+        `SELECT ${PAT_COLS} FROM pat WHERE id = $1 FOR UPDATE`,
+        [wireToUuid(patId)],
+      );
+      if (lock.rows.length === 0) {
+        throw new NotFoundError(`PAT ${patId} not found`);
+      }
+      if (lock.rows[0]!.revoked_at != null) {
+        // Idempotent: already revoked.
+        return this.rowToPat(lock.rows[0]!);
+      }
+      const now = this.now();
+      const upd = await c.query<PatRow>(
+        `UPDATE pat SET revoked_at = $1, updated_at = $1
+         WHERE id = $2 RETURNING ${PAT_COLS}`,
+        [now, wireToUuid(patId)],
+      );
+      return this.rowToPat(upd.rows[0]!);
+    });
+  }
+
+  async verifyPatToken(token: string): Promise<VerifiedPat> {
+    // Step 1–2: structural decode.
+    if (!token.startsWith("pat_")) throw new InvalidPatTokenError();
+    if (token.length < 4 + 32 + 1 + 1) throw new InvalidPatTokenError();
+    const idHex = token.slice(4, 36);
+    if (!/^[0-9a-f]{32}$/.test(idHex)) throw new InvalidPatTokenError();
+    if (token[36] !== "_") throw new InvalidPatTokenError();
+    const secretSegment = token.slice(37);
+    if (secretSegment.length === 0) throw new InvalidPatTokenError();
+    const patId = `pat_${idHex}` as PatId;
+
+    // Step 3: lookup. wireToUuid may throw if the structurally-valid
+    // 32hex segment isn't a real UUID — for timing-oracle purposes
+    // that's still "invalid token", so we conflate.
+    let patUuid: string;
+    try {
+      patUuid = wireToUuid(patId);
+    } catch {
+      throw new InvalidPatTokenError();
+    }
+    const res = await this.pool.query<PatRow>(
+      `SELECT ${PAT_COLS} FROM pat WHERE id = $1`,
+      [patUuid],
+    );
+    // Step 4: missing → conflated InvalidPatTokenError.
+    if (res.rows.length === 0) throw new InvalidPatTokenError();
+    const r = res.rows[0]!;
+    // Step 5: revoked terminal check.
+    if (r.revoked_at != null) throw new PatRevokedError(patId);
+    // Step 6: expiry.
+    const now = this.now();
+    if (r.expires_at != null && r.expires_at <= now) {
+      throw new PatExpiredError(patId);
+    }
+    // Step 7: Argon2id verify; conflated error shape.
+    if (!(await verifyPasswordHash(r.secret_hash, secretSegment))) {
+      throw new InvalidPatTokenError();
+    }
+    // Step 8: lastUsedAt update with coalescing.
+    const persisted = r.last_used_at ?? null;
+    const shouldUpdate =
+      persisted == null ||
+      this.patLastUsedCoalesceSeconds === 0 ||
+      Math.floor(now.getTime() / 1000) -
+        Math.floor(persisted.getTime() / 1000) >=
+        this.patLastUsedCoalesceSeconds;
+    if (shouldUpdate) {
+      await this.pool.query(
+        `UPDATE pat SET last_used_at = $1 WHERE id = $2`,
+        [now, patUuid],
+      );
+    }
+    return {
+      patId,
+      usrId: encode("usr", r.usr_id) as UsrId,
+      scope: r.scope ?? [],
+    };
+  }
+
+  private rowToPat(r: PatRow): PersonalAccessToken {
+    const now = this.now();
+    const expiresAt = r.expires_at ?? null;
+    const revokedAt = r.revoked_at ?? null;
+    let status: PatStatus;
+    if (revokedAt != null) {
+      status = "revoked";
+    } else if (expiresAt != null && expiresAt <= now) {
+      status = "expired";
+    } else {
+      status = "active";
+    }
+    return {
+      id: encode("pat", r.id) as PatId,
+      usrId: encode("usr", r.usr_id) as UsrId,
+      name: r.name,
+      scope: r.scope ?? [],
+      status,
+      expiresAt,
+      lastUsedAt: r.last_used_at ?? null,
+      revokedAt,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
   }
 
   // ─── helpers ───

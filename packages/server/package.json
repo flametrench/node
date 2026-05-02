@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/server",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Reference HTTP server for Flametrench: Fastify 5 app exposing the v0.1 OpenAPI surface, backed by pluggable stores. Bring your own identity/tenancy/authz store; the server wires everything else.",
   "license": "Apache-2.0",
   "author": {

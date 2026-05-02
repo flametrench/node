@@ -12,12 +12,24 @@ import {
   CredentialTypeMismatchError,
   DuplicateCredentialError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
+import type {
+  CreatePatInput,
+  CreatePatResult,
+  ListPatsForUserOptions,
+  PatId,
+  PatStatus,
+  PersonalAccessToken,
+  VerifiedPat,
+} from "./pat.js";
 import {
   generateRecoveryCodes,
   generateTotpSecret,
@@ -130,6 +142,14 @@ function timingSafeStringEqual(a: string, b: string): boolean {
 export interface InMemoryIdentityStoreOptions {
   /** Override the clock for deterministic tests. Default `() => new Date()`. */
   clock?: () => Date;
+  /**
+   * Coalescing window for `lastUsedAt` writes on `verifyPatToken` per
+   * ADR 0016 §"Operational notes". Within this window, repeat
+   * verifies of the same PAT do NOT update `lastUsedAt` on the public
+   * record; outside the window, the next verify updates it. 0
+   * disables coalescing (always update). Default 60 seconds.
+   */
+  patLastUsedCoalesceSeconds?: number;
 }
 
 // ─── Store ───
@@ -142,10 +162,19 @@ export class InMemoryIdentityStore implements IdentityStore {
   private readonly activeCredByIdentifier = new Map<string, CredId>();
   /** Secondary index: bearer-token-hash → sesId. */
   private readonly sessionByTokenHash = new Map<string, SesId>();
+  private readonly pats = new Map<PatId, PersonalAccessToken>();
+  private readonly patSecretHashes = new Map<PatId, string>();
+  /** patId → most recent persisted lastUsedAt; used by coalescing window. */
+  private readonly patLastUsedPersisted = new Map<PatId, Date>();
   private readonly clock: () => Date;
+  private readonly patLastUsedCoalesceSeconds: number;
 
   constructor(options: InMemoryIdentityStoreOptions = {}) {
     this.clock = options.clock ?? (() => new Date());
+    this.patLastUsedCoalesceSeconds = Math.max(
+      0,
+      options.patLastUsedCoalesceSeconds ?? 60,
+    );
   }
 
   private now(): Date {
@@ -1095,6 +1124,186 @@ export class InMemoryIdentityStore implements IdentityStore {
     this.mfaPolicies.set(input.usrId, policy);
     return policy;
   }
+
+  // ─── v0.3 personal access tokens (ADR 0016) ───
+
+  async createPat(input: CreatePatInput): Promise<CreatePatResult> {
+    const user = this.users.get(input.usrId);
+    if (!user) throw new NotFoundError(`User ${input.usrId} not found`);
+    if (user.status === "revoked") {
+      throw new AlreadyTerminalError(
+        `User ${input.usrId} is revoked; cannot issue PATs`,
+      );
+    }
+    if (input.name.length < 1 || input.name.length > 120) {
+      throw new PreconditionError(
+        `PAT name must be 1–120 characters (got ${input.name.length})`,
+        "pat.name_invalid",
+      );
+    }
+    const now = this.now();
+    if (input.expiresAt != null && input.expiresAt <= now) {
+      throw new PreconditionError(
+        "PAT expires_at must be strictly in the future",
+        "pat.expires_in_past",
+      );
+    }
+    const patId = generate("pat") as PatId;
+    const idHexSegment = patId.slice(4); // strip "pat_" → 32 hex
+    const secretBytes = randomBytes(32);
+    const secretSegment = base64UrlEncode(secretBytes);
+    const token = `pat_${idHexSegment}_${secretSegment}`;
+    const secretHash = await hashPassword(secretSegment);
+
+    const pat: PersonalAccessToken = {
+      id: patId,
+      usrId: input.usrId,
+      name: input.name,
+      scope: [...input.scope],
+      status: "active",
+      expiresAt: input.expiresAt ?? null,
+      lastUsedAt: null,
+      revokedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.pats.set(patId, pat);
+    this.patSecretHashes.set(patId, secretHash);
+    return { pat, token };
+  }
+
+  async getPat(patId: PatId): Promise<PersonalAccessToken> {
+    const pat = this.pats.get(patId);
+    if (!pat) throw new NotFoundError(`PAT ${patId} not found`);
+    return this.withDerivedStatus(pat);
+  }
+
+  async listPatsForUser(
+    usrId: UsrId,
+    options: ListPatsForUserOptions = {},
+  ): Promise<Page<PersonalAccessToken>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const matching: PersonalAccessToken[] = [];
+    for (const pat of this.pats.values()) {
+      if (pat.usrId !== usrId) continue;
+      const derived = this.withDerivedStatus(pat);
+      if (options.status != null && derived.status !== options.status) continue;
+      matching.push(derived);
+    }
+    matching.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    let startIdx = 0;
+    if (options.cursor != null) {
+      for (let i = 0; i < matching.length; i++) {
+        if (matching[i]!.id > options.cursor) {
+          startIdx = i;
+          break;
+        }
+        startIdx = i + 1;
+      }
+    }
+    const slice = matching.slice(startIdx, startIdx + limit);
+    const nextCursor =
+      startIdx + limit < matching.length && slice.length > 0
+        ? slice[slice.length - 1]!.id
+        : null;
+    return { data: slice, nextCursor };
+  }
+
+  async revokePat(patId: PatId): Promise<PersonalAccessToken> {
+    const pat = this.pats.get(patId);
+    if (!pat) throw new NotFoundError(`PAT ${patId} not found`);
+    // Idempotent: already revoked → return existing.
+    if (pat.revokedAt != null) return this.withDerivedStatus(pat);
+    const now = this.now();
+    const updated: PersonalAccessToken = {
+      ...pat,
+      status: "revoked",
+      revokedAt: now,
+      updatedAt: now,
+    };
+    this.pats.set(patId, updated);
+    return updated;
+  }
+
+  async verifyPatToken(token: string): Promise<VerifiedPat> {
+    // Step 1–2: structural decode. Per ADR 0016 the format is
+    // pat_<32hex>_<base64url-secret>.
+    if (!token.startsWith("pat_")) {
+      throw new InvalidPatTokenError();
+    }
+    if (token.length < 4 + 32 + 1 + 1) {
+      throw new InvalidPatTokenError();
+    }
+    const idHex = token.slice(4, 36);
+    if (!/^[0-9a-f]{32}$/.test(idHex)) {
+      throw new InvalidPatTokenError();
+    }
+    if (token[36] !== "_") {
+      throw new InvalidPatTokenError();
+    }
+    const secretSegment = token.slice(37);
+    if (secretSegment.length === 0) {
+      throw new InvalidPatTokenError();
+    }
+    const patId = `pat_${idHex}` as PatId;
+
+    // Step 3–4: lookup; conflate "no row" with "wrong secret".
+    const pat = this.pats.get(patId);
+    if (!pat) throw new InvalidPatTokenError();
+
+    // Step 5: revoked terminal check.
+    if (pat.revokedAt != null) throw new PatRevokedError(patId);
+    // Step 6: expiry.
+    const now = this.now();
+    if (pat.expiresAt != null && pat.expiresAt <= now) {
+      throw new PatExpiredError(patId);
+    }
+    // Step 7: Argon2id verify; conflated error shape.
+    const hash = this.patSecretHashes.get(patId);
+    if (hash == null || !(await verifyPasswordHash(hash, secretSegment))) {
+      throw new InvalidPatTokenError();
+    }
+    // Step 8: lastUsedAt update with coalescing.
+    const persisted = this.patLastUsedPersisted.get(patId) ?? null;
+    const shouldUpdate =
+      persisted == null ||
+      this.patLastUsedCoalesceSeconds === 0 ||
+      Math.floor(now.getTime() / 1000) - Math.floor(persisted.getTime() / 1000) >=
+        this.patLastUsedCoalesceSeconds;
+    if (shouldUpdate) {
+      this.pats.set(patId, { ...pat, lastUsedAt: now, updatedAt: now });
+      this.patLastUsedPersisted.set(patId, now);
+    }
+    return { patId, usrId: pat.usrId, scope: [...pat.scope] };
+  }
+
+  /**
+   * Derive the public `status` from lifecycle columns. The persisted
+   * status is what was set at write time; reads always re-derive so a
+   * row that crossed its expiresAt without being touched still reports
+   * "expired" to the caller.
+   */
+  private withDerivedStatus(pat: PersonalAccessToken): PersonalAccessToken {
+    let derived: PatStatus;
+    if (pat.revokedAt != null) {
+      derived = "revoked";
+    } else if (pat.expiresAt != null && pat.expiresAt <= this.now()) {
+      derived = "expired";
+    } else {
+      derived = "active";
+    }
+    if (derived === pat.status) return pat;
+    return { ...pat, status: derived };
+  }
+}
+
+/** RFC 4648 §5 base64url, no padding. Matches the spec wire format. */
+function base64UrlEncode(buf: Uint8Array): string {
+  return Buffer.from(buf)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 /** Inline RFC 4648 base32 — the Python SDK uses base64.b32encode for the otpauth URI. */
