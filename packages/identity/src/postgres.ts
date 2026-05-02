@@ -50,7 +50,7 @@ import {
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
-import { PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
+import { PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
 import type {
   CreatePatInput,
   CreatePatResult,
@@ -1772,6 +1772,9 @@ export class PostgresIdentityStore implements IdentityStore {
     try {
       patUuid = wireToUuid(patId);
     } catch {
+      // security-audit-v0.3.md H2: timing-oracle defense for
+      // structurally-valid-but-not-UUIDv7 ids.
+      await verifyPasswordHash(PAT_DUMMY_PHC_HASH, secretSegment);
       throw new InvalidPatTokenError();
     }
     const res = await this.pool.query<PatRow>(
@@ -1779,7 +1782,14 @@ export class PostgresIdentityStore implements IdentityStore {
       [patUuid],
     );
     // Step 4: missing → conflated InvalidPatTokenError.
-    if (res.rows.length === 0) throw new InvalidPatTokenError();
+    // security-audit-v0.3.md H2: perform Argon2id verify against a
+    // dummy hash before throwing so wall-clock time matches the
+    // row-exists path. Defends against pat_id existence probing
+    // via timing.
+    if (res.rows.length === 0) {
+      await verifyPasswordHash(PAT_DUMMY_PHC_HASH, secretSegment);
+      throw new InvalidPatTokenError();
+    }
     const r = res.rows[0]!;
     // Step 5: revoked terminal check.
     if (r.revoked_at != null) throw new PatRevokedError(patId);

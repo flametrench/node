@@ -21,7 +21,7 @@ import {
   SessionExpiredError,
 } from "./errors.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
-import { PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
+import { PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS } from "./pat.js";
 import type {
   CreatePatInput,
   CreatePatResult,
@@ -1259,8 +1259,20 @@ export class InMemoryIdentityStore implements IdentityStore {
     const patId = `pat_${idHex}` as PatId;
 
     // Step 3–4: lookup; conflate "no row" with "wrong secret".
+    // security-audit-v0.3.md H2: when the row is missing we still
+    // perform an Argon2id verify against a dummy hash so the
+    // wall-clock time of the missing-row path matches the
+    // row-exists-but-wrong-secret path. Without this, an attacker
+    // can probe pat_id existence via timing without ever knowing
+    // the secret. The dummy PHC hash is the same one used in the
+    // argon2id.json conformance fixture — known-good, generated
+    // with the spec floor parameters, will never match a real
+    // 43-char base64url PAT secret.
     const pat = this.pats.get(patId);
-    if (!pat) throw new InvalidPatTokenError();
+    if (!pat) {
+      await verifyPasswordHash(PAT_DUMMY_PHC_HASH, secretSegment);
+      throw new InvalidPatTokenError();
+    }
 
     // Step 5: revoked terminal check.
     if (pat.revokedAt != null) throw new PatRevokedError(patId);
