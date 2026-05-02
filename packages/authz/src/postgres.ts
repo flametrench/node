@@ -184,9 +184,23 @@ function objectIdToUuid(objectId: string): string {
  * Mirrors {@link objectIdToUuid}. The `subject_id` column is UUID, so
  * we always need to land at a UUID string Postgres can bind.
  */
-function subjectIdToUuid(subjectId: string): string {
+function subjectIdToUuid(subjectId: string, subjectType?: string): string {
+  // security-audit-v0.3.md M9: when a subjectType is supplied, assert
+  // the wire-id's prefix matches it. Pre-fix this helper accepted any
+  // "<word>_<uuid>" string, so a caller passing a stale (subjectType,
+  // subjectId) pair where the id's prefix didn't match the type was
+  // silently coerced. The Postgres column is typed by subjectType, so
+  // the resulting row could either fail the natural-key UNIQUE or
+  // silently land under the wrong type.
   if (/^[a-z]{2,6}_[0-9a-f]{32}$/.test(subjectId)) {
-    return decodeAny(subjectId).uuid;
+    const decoded = decodeAny(subjectId);
+    if (subjectType !== undefined && decoded.type !== subjectType) {
+      throw new InvalidFormatError(
+        `subjectId ${JSON.stringify(subjectId)} prefix does not match subjectType ${JSON.stringify(subjectType)}`,
+        "subject_id",
+      );
+    }
+    return decoded.uuid;
   }
   return subjectId;
 }
@@ -262,7 +276,7 @@ export class PostgresTupleStore implements TupleStore {
     }
     return this.nested(async () => {
       const id = decode(generate("tup")).uuid;
-      const subjectUuid = subjectIdToUuid(input.subjectId);
+      const subjectUuid = subjectIdToUuid(input.subjectId, input.subjectType);
       const objectUuid = objectIdToUuid(input.objectId);
       const createdByUuid = input.createdBy ? wireToUuid(input.createdBy) : null;
       const now = this.now();
@@ -329,7 +343,7 @@ export class PostgresTupleStore implements TupleStore {
     return this.nested(async () => {
       const { rowCount } = await this.pool.query(
         `DELETE FROM tup WHERE subject_type = $1 AND subject_id = $2`,
-        [subjectType, subjectIdToUuid(subjectId)],
+        [subjectType, subjectIdToUuid(subjectId, subjectType)],
       );
       return rowCount ?? 0;
     });
@@ -382,7 +396,7 @@ export class PostgresTupleStore implements TupleStore {
     // `relation = ANY($3)` short-circuits across the whole set in one
     // round trip — preserving the v0.2 behavior.
     if (this.rules === null) {
-      const subjectUuid = subjectIdToUuid(input.subjectId);
+      const subjectUuid = subjectIdToUuid(input.subjectId, input.subjectType);
       const { rows } = await this.pool.query<{ id: string }>(
         `SELECT id FROM tup
          WHERE subject_type = $1 AND subject_id = $2
@@ -432,7 +446,7 @@ export class PostgresTupleStore implements TupleStore {
        LIMIT 1`,
       [
         subjectType,
-        subjectIdToUuid(subjectId),
+        subjectIdToUuid(subjectId, subjectType),
         relation,
         objectType,
         objectIdToUuid(objectId),
@@ -499,8 +513,8 @@ export class PostgresTupleStore implements TupleStore {
        ORDER BY id
        LIMIT $3`,
       cursor
-        ? [subjectType, subjectIdToUuid(subjectId), limit + 1, wireToUuid(cursor)]
-        : [subjectType, subjectIdToUuid(subjectId), limit + 1],
+        ? [subjectType, subjectIdToUuid(subjectId, subjectType), limit + 1, wireToUuid(cursor)]
+        : [subjectType, subjectIdToUuid(subjectId, subjectType), limit + 1],
     );
     return paginate(rows, limit);
   }
