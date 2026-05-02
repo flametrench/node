@@ -201,7 +201,7 @@ export class InMemoryTupleStore implements TupleStore {
       return { allowed: false, matchedTupleId: null };
     }
 
-    const result = evaluate({
+    const result = await evaluate({
       rules: this.rules,
       subjectType: input.subjectType,
       subjectId: input.subjectId,
@@ -219,14 +219,18 @@ export class InMemoryTupleStore implements TupleStore {
     };
   }
 
-  /** Direct natural-key lookup callback for the rule evaluator. */
+  /**
+   * Direct natural-key lookup callback for the rule evaluator. v0.3
+   * (ADR 0017) made the evaluator async-capable; the in-memory map
+   * probe wraps in `Promise.resolve(...)`.
+   */
   private directLookup = (
     subjectType: string,
     subjectId: string,
     relation: string,
     objectType: string,
     objectId: string,
-  ): string | null => {
+  ): Promise<string | null> => {
     const key = InMemoryTupleStore.naturalKey(
       subjectType as SubjectType,
       subjectId as UsrId,
@@ -234,7 +238,7 @@ export class InMemoryTupleStore implements TupleStore {
       objectType,
       objectId,
     );
-    return this.keyIndex.get(key) ?? null;
+    return Promise.resolve(this.keyIndex.get(key) ?? null);
   };
 
   /** Enumerate tuples on an object by relation. Used by tuple_to_userset. */
@@ -242,9 +246,8 @@ export class InMemoryTupleStore implements TupleStore {
     objectType: string,
     objectId: string,
     relation: string | null,
-  ): Iterable<{ subjectType: string; subjectId: string; tupId: string }> => {
-    const out: Array<{ subjectType: string; subjectId: string; tupId: string }> =
-      [];
+  ): Promise<{ subjectType: string; subjectId: string; tupId: string }[]> => {
+    const out: { subjectType: string; subjectId: string; tupId: string }[] = [];
     for (const t of this.tuples.values()) {
       if (t.objectType !== objectType || t.objectId !== objectId) continue;
       if (relation !== null && t.relation !== relation) continue;
@@ -254,7 +257,7 @@ export class InMemoryTupleStore implements TupleStore {
         tupId: t.id,
       });
     }
-    return out;
+    return Promise.resolve(out);
   };
 
   async checkAny(input: CheckSetInput): Promise<CheckResult> {

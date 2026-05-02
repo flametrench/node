@@ -3,6 +3,21 @@
 All notable changes to `@flametrench/authz` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.3.0] — Unreleased
+
+### Added (Postgres rewrite-rule evaluation, ADR 0017)
+- `PostgresTupleStore` constructor accepts a new optional `rules` parameter mirroring `InMemoryTupleStore`. When set, `check()` evaluates rewrite rules via iterative async expansion against Postgres (one indexed SELECT per direct lookup; recursive over `computed_userset`; one SELECT per `tuple_to_userset` enumeration). Cycle detection, depth + fan-out bounds, and short-circuit semantics from ADR 0007 are preserved verbatim.
+- `PostgresTupleStore` constructor also accepts `maxDepth` (default 8) and `maxFanOut` (default 1024) — the same evaluation bounds as `InMemoryTupleStore`.
+- New `subjectIdToUuid` accepts wire-format ids with any registered prefix (e.g. `org_<hex>`), not just `usr_<hex>`. Required for `tuple_to_userset` patterns where the parent hop is a non-`usr` object.
+- New `postgres-rewrite-rules.test.ts` mirrors `rewrite-rules.test.ts` against the live Postgres adapter (11 tests covering `computed_userset` chains, `tuple_to_userset` parent inheritance, cycle detection, depth-limit, and `checkAny` fast-path / rules-path).
+
+### Changed
+- **`evaluate()` (internal rewrite-rule evaluator) is now async-capable** per ADR 0017. `DirectLookup` and `ListByObject` callbacks return `Promise<...>`. `InMemoryTupleStore` wraps the synchronous map probe in `Promise.resolve(...)`; `PostgresTupleStore` issues real async queries. Adopters who called `evaluate()` directly (a small set; most use `tupleStore.check()`) MUST migrate to `await evaluate(...)`.
+- `PostgresTupleStore.check()` and `checkAny()` now route through the rule-aware path when `rules` is set. With `rules` unset (or `{}`), behavior is byte-identical to v0.2.
+
+### Test infrastructure
+- `postgres-schema.sql` re-synced from spec `reference/postgres.sql` to pick up the relaxed `tup.subject_type` constraint (now `^[a-z]{2,6}$` per ADR 0017 follow-up). The v0.1/v0.2 `subject_type IN ('usr')` constraint silently blocked `tuple_to_userset` patterns; lifting it is additive.
+
 ## [v0.2.1] — 2026-05-01
 
 ### Fixed (release-process)

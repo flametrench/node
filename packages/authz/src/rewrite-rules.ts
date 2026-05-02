@@ -74,21 +74,30 @@ export interface EvaluationResult {
   matchedTupleId: string | null;
 }
 
-/** Returns the matched direct tuple id or null. */
+/**
+ * Returns the matched direct tuple id or null.
+ *
+ * v0.3 (ADR 0017): async-capable. InMemoryTupleStore wraps a sync map
+ * probe in `Promise.resolve(...)`; PostgresTupleStore issues a real
+ * SELECT.
+ */
 export type DirectLookup = (
   subjectType: string,
   subjectId: string,
   relation: string,
   objectType: string,
   objectId: string,
-) => string | null;
+) => Promise<string | null>;
 
-/** Returns iterable of {subjectType, subjectId, tupId} for the (object, relation) pair. */
+/**
+ * Returns the {subjectType, subjectId, tupId} list for the
+ * (object, relation) pair. Async per ADR 0017.
+ */
 export type ListByObject = (
   objectType: string,
   objectId: string,
   relation: string | null,
-) => Iterable<{ subjectType: string; subjectId: string; tupId: string }>;
+) => Promise<{ subjectType: string; subjectId: string; tupId: string }[]>;
 
 export interface EvaluateOptions {
   rules: Rules | null;
@@ -123,8 +132,12 @@ export interface EvaluateOptions {
  * Bounds: `maxDepth` is the recursion ceiling. `maxFanOut` is the
  * per-`TupleToUserset` enumeration ceiling. Either exceeded raises
  * `EvaluationLimitExceededError`.
+ *
+ * v0.3 (ADR 0017): async-capable. Sequential expansion preserves
+ * cycle-detection stack semantics across awaits — DO NOT parallelize
+ * sub-branches without re-deriving the stack guarantees.
  */
-export function evaluate(opts: EvaluateOptions): EvaluationResult {
+export async function evaluate(opts: EvaluateOptions): Promise<EvaluationResult> {
   const {
     rules,
     subjectType,
@@ -135,15 +148,15 @@ export function evaluate(opts: EvaluateOptions): EvaluationResult {
     maxFanOut = DEFAULT_MAX_FAN_OUT,
   } = opts;
 
-  const go = (
+  const go = async (
     relation: string,
     objectType: string,
     objectId: string,
     stack: readonly Frame[],
     depth: number,
-  ): EvaluationResult => {
+  ): Promise<EvaluationResult> => {
     // 1. Direct lookup.
-    const direct = directLookup(
+    const direct = await directLookup(
       subjectType,
       subjectId,
       relation,
@@ -191,7 +204,7 @@ export function evaluate(opts: EvaluateOptions): EvaluationResult {
         continue;
       }
       if (node.type === "computed_userset") {
-        const result = go(
+        const result = await go(
           node.relation,
           objectType,
           objectId,
@@ -202,16 +215,14 @@ export function evaluate(opts: EvaluateOptions): EvaluationResult {
         continue;
       }
       if (node.type === "tuple_to_userset") {
-        const related = [
-          ...listByObject(objectType, objectId, node.tuplesetRelation),
-        ];
+        const related = await listByObject(objectType, objectId, node.tuplesetRelation);
         if (related.length > maxFanOut) {
           throw new EvaluationLimitExceededError(
             `tuple_to_userset fan-out exceeded (${related.length} > ${maxFanOut}) at ${objectType}.${relation} via ${node.tuplesetRelation}`,
           );
         }
         for (const { subjectType: relSubType, subjectId: relSubId } of related) {
-          const result = go(
+          const result = await go(
             node.computedUsersetRelation,
             relSubType,
             relSubId,

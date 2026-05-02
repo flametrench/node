@@ -102,6 +102,12 @@ import {
   type ShrId,
   type VerifiedShare,
 } from "./shares.js";
+import {
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_FAN_OUT,
+  evaluate,
+  type Rules,
+} from "./rewrite-rules.js";
 import type { TupleStore } from "./store.js";
 import {
   RELATION_NAME_PATTERN,
@@ -167,19 +173,60 @@ function objectIdToUuid(objectId: string): string {
   return objectId;
 }
 
+/**
+ * v0.3 (ADR 0017) — accept subject ids in any of three shapes:
+ *   - Wire format `usr_<32hex>` (the v0.1/v0.2 default)
+ *   - Wire format with any registered prefix (`org_<32hex>`, etc.) —
+ *     used by `tuple_to_userset` recursion when the parent hop is a
+ *     non-`usr` object.
+ *   - Bare canonical UUID (hyphenated or 32-char hex) — passthrough.
+ *
+ * Mirrors {@link objectIdToUuid}. The `subject_id` column is UUID, so
+ * we always need to land at a UUID string Postgres can bind.
+ */
+function subjectIdToUuid(subjectId: string): string {
+  if (/^[a-z]{2,6}_[0-9a-f]{32}$/.test(subjectId)) {
+    return decodeAny(subjectId).uuid;
+  }
+  return subjectId;
+}
+
+/** UUID `01234567-89ab-...` → bare 32-char hex `0123456789ab...`. */
+function uuidHyphensToBare(hyphenated: string): string {
+  return hyphenated.replace(/-/g, "");
+}
+
 export interface PostgresTupleStoreOptions {
   /** Override the clock for deterministic tests. */
   clock?: () => Date;
+  /**
+   * Optional rewrite-rule registry per ADR 0017 (v0.3). When unset,
+   * `check()` is exact-match-only (v0.2-identical). When set, the
+   * store evaluates rewrite rules via iterative async expansion
+   * — same algorithm as InMemoryTupleStore, with each tuple lookup
+   * issued as a Postgres SELECT.
+   */
+  rules?: Rules;
+  /** Recursion ceiling for rule expansion. Default {@link DEFAULT_MAX_DEPTH}. */
+  maxDepth?: number;
+  /** Per-`tuple_to_userset` enumeration ceiling. Default {@link DEFAULT_MAX_FAN_OUT}. */
+  maxFanOut?: number;
 }
 
 export class PostgresTupleStore implements TupleStore {
   private readonly clock: () => Date;
+  private readonly rules: Rules | null;
+  private readonly maxDepth: number;
+  private readonly maxFanOut: number;
 
   constructor(
     private readonly pool: PostgresAuthzClient,
     options: PostgresTupleStoreOptions = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
+    this.rules = options.rules ?? null;
+    this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    this.maxFanOut = options.maxFanOut ?? DEFAULT_MAX_FAN_OUT;
   }
 
   private now(): Date {
@@ -215,7 +262,7 @@ export class PostgresTupleStore implements TupleStore {
     }
     return this.nested(async () => {
       const id = decode(generate("tup")).uuid;
-      const subjectUuid = wireToUuid(input.subjectId);
+      const subjectUuid = subjectIdToUuid(input.subjectId);
       const objectUuid = objectIdToUuid(input.objectId);
       const createdByUuid = input.createdBy ? wireToUuid(input.createdBy) : null;
       const now = this.now();
@@ -282,7 +329,7 @@ export class PostgresTupleStore implements TupleStore {
     return this.nested(async () => {
       const { rowCount } = await this.pool.query(
         `DELETE FROM tup WHERE subject_type = $1 AND subject_id = $2`,
-        [subjectType, wireToUuid(subjectId)],
+        [subjectType, subjectIdToUuid(subjectId)],
       );
       return rowCount ?? 0;
     });
@@ -291,39 +338,139 @@ export class PostgresTupleStore implements TupleStore {
   // ─── check() / checkAny() ───
 
   async check(input: CheckInput): Promise<CheckResult> {
-    return this.checkAny({ ...input, relations: [input.relation] });
+    // v0.1 fast path: direct natural-key lookup. Returns immediately on
+    // a direct hit regardless of whether rules are registered.
+    const direct = await this.directLookup(
+      input.subjectType,
+      input.subjectId,
+      input.relation,
+      input.objectType,
+      input.objectId,
+    );
+    if (direct !== null) {
+      return { allowed: true, matchedTupleId: direct as TupId };
+    }
+    // ADR 0017 path: rule expansion only on direct-lookup miss AND
+    // when rules are registered. With rules=null behavior is
+    // byte-identical to v0.2.
+    if (this.rules === null) {
+      return { allowed: false, matchedTupleId: null };
+    }
+    const result = await evaluate({
+      rules: this.rules,
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      relation: input.relation,
+      objectType: input.objectType,
+      objectId: input.objectId,
+      directLookup: this.directLookup,
+      listByObject: this.listByObject,
+      maxDepth: this.maxDepth,
+      maxFanOut: this.maxFanOut,
+    });
+    return {
+      allowed: result.allowed,
+      matchedTupleId: result.matchedTupleId as TupId | null,
+    };
   }
 
   async checkAny(input: CheckSetInput): Promise<CheckResult> {
     if (input.relations.length === 0) {
       throw new EmptyRelationSetError();
     }
-    // PostgresTupleStore is exact-match only in v0.2 (the load-bearing
-    // path for production adopters). Rewrite-rule support requires
-    // bridging the SDK's synchronous `evaluate()` to Postgres's async
-    // queries — design tracked for v0.3. Adopters with rule needs:
-    // bring the relevant tuple subset into memory and use
-    // InMemoryTupleStore with `rules` option.
-    const subjectUuid = wireToUuid(input.subjectId);
+    // Fast path: when no rules are registered, a single SELECT with
+    // `relation = ANY($3)` short-circuits across the whole set in one
+    // round trip — preserving the v0.2 behavior.
+    if (this.rules === null) {
+      const subjectUuid = subjectIdToUuid(input.subjectId);
+      const { rows } = await this.pool.query<{ id: string }>(
+        `SELECT id FROM tup
+         WHERE subject_type = $1 AND subject_id = $2
+           AND relation = ANY($3) AND object_type = $4 AND object_id = $5
+         LIMIT 1`,
+        [
+          input.subjectType,
+          subjectUuid,
+          input.relations,
+          input.objectType,
+          objectIdToUuid(input.objectId),
+        ],
+      );
+      const allowed = rows.length > 0;
+      return {
+        allowed,
+        matchedTupleId: allowed ? (encode("tup", rows[0]!.id) as TupId) : null,
+      };
+    }
+    // With rules, evaluate each relation in turn until first match
+    // (or all denied). Per ADR 0017: no union-of-rules optimization.
+    for (const relation of input.relations) {
+      const result = await this.check({
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        relation,
+        objectType: input.objectType,
+        objectId: input.objectId,
+      });
+      if (result.allowed) return result;
+    }
+    return { allowed: false, matchedTupleId: null };
+  }
+
+  /** Direct natural-key lookup against Postgres. Used by the rule evaluator. */
+  private directLookup = async (
+    subjectType: string,
+    subjectId: string,
+    relation: string,
+    objectType: string,
+    objectId: string,
+  ): Promise<string | null> => {
     const { rows } = await this.pool.query<{ id: string }>(
       `SELECT id FROM tup
        WHERE subject_type = $1 AND subject_id = $2
-         AND relation = ANY($3) AND object_type = $4 AND object_id = $5
+         AND relation = $3 AND object_type = $4 AND object_id = $5
        LIMIT 1`,
       [
-        input.subjectType,
-        subjectUuid,
-        input.relations,
-        input.objectType,
-        objectIdToUuid(input.objectId),
+        subjectType,
+        subjectIdToUuid(subjectId),
+        relation,
+        objectType,
+        objectIdToUuid(objectId),
       ],
     );
-    const allowed = rows.length > 0;
-    return {
-      allowed,
-      matchedTupleId: allowed ? (encode("tup", rows[0]!.id) as TupId) : null,
-    };
-  }
+    return rows.length > 0 ? (encode("tup", rows[0]!.id) as string) : null;
+  };
+
+  /**
+   * Enumerate tuples on (object, relation). Used by tuple_to_userset.
+   *
+   * The returned subjectId is wire-format prefixed with the row's
+   * subject_type — e.g. `org_<hex>` for org-subject parent_org tuples.
+   * The evaluator passes the value through as the next-hop objectId,
+   * which `objectIdToUuid` then accepts.
+   */
+  private listByObject = async (
+    objectType: string,
+    objectId: string,
+    relation: string | null,
+  ): Promise<{ subjectType: string; subjectId: string; tupId: string }[]> => {
+    const objectUuid = objectIdToUuid(objectId);
+    const params: unknown[] = [objectType, objectUuid];
+    let sql = `SELECT id, subject_type, subject_id FROM tup
+               WHERE object_type = $1 AND object_id = $2`;
+    if (relation !== null) {
+      sql += ` AND relation = $3`;
+      params.push(relation);
+    }
+    const { rows } = await this.pool.query<TupRow>(sql, params);
+    return rows.map((r) => ({
+      subjectType: r.subject_type,
+      // pg returns UUID columns as canonical hyphenated strings; the
+      // wire format is bare 32-hex, so strip hyphens before re-encoding.
+      subjectId: `${r.subject_type}_${uuidHyphensToBare(r.subject_id)}`,
+      tupId: encode("tup", r.id),
+    }));
+  };
 
   // ─── Read accessors ───
 
@@ -352,8 +499,8 @@ export class PostgresTupleStore implements TupleStore {
        ORDER BY id
        LIMIT $3`,
       cursor
-        ? [subjectType, wireToUuid(subjectId), limit + 1, wireToUuid(cursor)]
-        : [subjectType, wireToUuid(subjectId), limit + 1],
+        ? [subjectType, subjectIdToUuid(subjectId), limit + 1, wireToUuid(cursor)]
+        : [subjectType, subjectIdToUuid(subjectId), limit + 1],
     );
     return paginate(rows, limit);
   }
