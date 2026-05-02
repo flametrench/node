@@ -146,15 +146,28 @@ export interface IdentityStore {
    * Argon2id hash of the secret segment at the cred-password
    * parameter floor.
    *
-   * Authorization gating is the adopter's responsibility — typically
-   * "the requesting principal owns input.usrId, OR is a sysadmin
-   * acting on the user's behalf." The SDK does not enforce.
+   * @security Adopter MUST gate this call so the requesting principal
+   * either owns `input.usrId` OR is a sysadmin acting on the user's
+   * behalf. The SDK does not enforce. (security-audit-v0.3.md H7.)
    */
   createPat(input: CreatePatInput): Promise<CreatePatResult>;
 
+  /**
+   * @security Adopter MUST gate so the requesting principal either
+   * owns the PAT (matches `usrId` of the row) OR is a sysadmin. The
+   * SDK returns the row regardless — without route-layer gating an
+   * unauthenticated/wrong-principal request leaks the PAT's
+   * existence, scope, and metadata. (security-audit-v0.3.md H7.)
+   */
   getPat(patId: PatId): Promise<PersonalAccessToken>;
 
-  /** Cursor-paginated PAT list for a user. Mirrors `listMembers`. */
+  /**
+   * Cursor-paginated PAT list for a user. Mirrors `listMembers`.
+   *
+   * @security Adopter MUST gate so the requesting principal either is
+   * `usrId` OR is a sysadmin. Without gating, any caller can
+   * enumerate any user's PATs. (security-audit-v0.3.md H7.)
+   */
   listPatsForUser(
     usrId: UsrId,
     options?: ListPatsForUserOptions,
@@ -163,6 +176,11 @@ export interface IdentityStore {
   /**
    * Terminal-state revoke. Idempotent: revoking an already-revoked
    * PAT returns the existing row.
+   *
+   * @security Adopter MUST gate so the requesting principal either
+   * owns the PAT OR is a sysadmin. Without gating, any caller can
+   * revoke any user's PAT — locking the legitimate owner out of
+   * their own automation. (security-audit-v0.3.md H7.)
    */
   revokePat(patId: PatId): Promise<PersonalAccessToken>;
 
