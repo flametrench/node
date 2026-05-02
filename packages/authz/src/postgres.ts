@@ -47,7 +47,11 @@ function callerName(): string {
 function makeSavepointName(method: string): string {
   const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
   const safe = sanitized.length > 0 ? sanitized : "tx";
-  const rand = randomBytes(4).toString("hex");
+  // security-audit-v0.3.md L1: 8 bytes = 64-bit suffix; the 4-byte
+  // form had a birthday collision floor at ~65k savepoints per
+  // connection, well above any real workload but cheap to raise to
+  // a 2^32 floor for free.
+  const rand = randomBytes(8).toString("hex");
   return `ft_${safe}_${rand}`;
 }
 

@@ -24,6 +24,7 @@ export {
   resolveBearer,
 } from "./resolve-bearer.js";
 export type {
+  AuthKind,
   ResolveBearerStores,
   ResolvedBearer,
 } from "./resolve-bearer.js";

@@ -149,6 +149,13 @@ export interface IdentityStore {
    * @security Adopter MUST gate this call so the requesting principal
    * either owns `input.usrId` OR is a sysadmin acting on the user's
    * behalf. The SDK does not enforce. (security-audit-v0.3.md H7.)
+   *
+   * @security Adopter MUST gate calls on `input.scope`. The SDK
+   * persists scope as opaque strings — it does NOT interpret them at
+   * verifyPatToken time. Unlike `tup.relation` (which `check()`
+   * enforces against the rule registry), scope is purely an audit tag
+   * unless the adopter's request handler reads `VerifiedPat.scope` and
+   * gates the request. (security-audit-v0.3.md F5.)
    */
   createPat(input: CreatePatInput): Promise<CreatePatResult>;
 

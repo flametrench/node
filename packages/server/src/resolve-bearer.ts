@@ -30,6 +30,19 @@
 import type { IdentityStore, VerifiedPat } from "@flametrench/identity";
 import type { ShareStore, VerifiedShare } from "@flametrench/authz";
 
+/**
+ * Audit `auth.kind` discriminator values per ADR 0016 §"Bearer routing".
+ *
+ * security-audit-v0.3.md F3: pre-fix `"pat" | "share" | "session"` was
+ * inlined at every callsite (classifyBearer, ResolvedBearer, audit
+ * logger code) and `"system"` (operator-initiated, no human bearer)
+ * lived only in spec prose with no SDK constant. Adopters writing
+ * cron / scheduled jobs reach for `"pat"` or `"session"` because
+ * those exist as code values; `"system"` did not. Add a single union
+ * type that documents all four values once.
+ */
+export type AuthKind = "pat" | "share" | "session" | "system";
+
 /** Stable error code for tokens that don't match any registered prefix. */
 export const TOKEN_FORMAT_UNRECOGNIZED_CODE = "auth.token_format_unrecognized";
 
@@ -86,7 +99,7 @@ export interface ResolveBearerStores {
  * before the verifier runs (e.g., logging the classification of a
  * token that subsequently fails verification).
  */
-export function classifyBearer(token: string): "pat" | "share" | "session" {
+export function classifyBearer(token: string): Exclude<AuthKind, "system"> {
   if (token.startsWith("pat_")) return "pat";
   if (token.startsWith("shr_")) return "share";
   return "session";

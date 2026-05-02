@@ -53,7 +53,8 @@ function callerName(): string {
 function makeSavepointName(method: string): string {
   const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
   const safe = sanitized.length > 0 ? sanitized : "tx";
-  const rand = randomBytes(4).toString("hex");
+  // security-audit-v0.3.md L1: 8 bytes — see authz postgres.ts.
+  const rand = randomBytes(8).toString("hex");
   return `ft_${safe}_${rand}`;
 }
 

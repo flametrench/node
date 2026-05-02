@@ -25,6 +25,7 @@ import {
   PAT_DUMMY_PHC_HASH,
   PAT_MAX_LIFETIME_SECONDS,
   PAT_MAX_SECRET_LENGTH,
+  isStructurallyValidPatToken,
 } from "./pat.js";
 import type {
   CreatePatInput,
@@ -1242,26 +1243,20 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   async verifyPatToken(token: string): Promise<VerifiedPat> {
     // Step 1–2: structural decode. Per ADR 0016 the format is
-    // pat_<32hex>_<base64url-secret>.
-    if (!token.startsWith("pat_")) {
-      throw new InvalidPatTokenError();
-    }
-    if (token.length < 4 + 32 + 1 + 1) {
+    // pat_<32hex>_<base64url-secret>. security-audit-v0.3.md L3:
+    // delegate the structural check to the canonical helper rather
+    // than re-implementing it here — the helper drives the spec
+    // conformance fixture so any drift surfaces immediately.
+    if (!isStructurallyValidPatToken(token)) {
       throw new InvalidPatTokenError();
     }
     const idHex = token.slice(4, 36);
-    if (!/^[0-9a-f]{32}$/.test(idHex)) {
-      throw new InvalidPatTokenError();
-    }
-    if (token[36] !== "_") {
-      throw new InvalidPatTokenError();
-    }
     const secretSegment = token.slice(37);
     // security-audit-v0.3.md H6: cap on secret-segment length so an
     // attacker with a known pat_id cannot force unbounded Argon2id
     // work by submitting MB-sized secrets. Real PAT secrets are 43
     // chars (32 random bytes base64url-encoded); 256 is generous.
-    if (secretSegment.length === 0 || secretSegment.length > PAT_MAX_SECRET_LENGTH) {
+    if (secretSegment.length > PAT_MAX_SECRET_LENGTH) {
       throw new InvalidPatTokenError();
     }
     const patId = `pat_${idHex}` as PatId;

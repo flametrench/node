@@ -54,6 +54,7 @@ import {
   PAT_DUMMY_PHC_HASH,
   PAT_MAX_LIFETIME_SECONDS,
   PAT_MAX_SECRET_LENGTH,
+  isStructurallyValidPatToken,
 } from "./pat.js";
 import type {
   CreatePatInput,
@@ -139,7 +140,8 @@ function callerName(): string {
 function makeSavepointName(method: string): string {
   const sanitized = method.replace(/[^A-Za-z0-9]/g, "");
   const safe = sanitized.length > 0 ? sanitized : "tx";
-  const rand = randomBytes(4).toString("hex");
+  // security-audit-v0.3.md L1: 8 bytes — see authz postgres.ts.
+  const rand = randomBytes(8).toString("hex");
   return `ft_${safe}_${rand}`;
 }
 
@@ -1759,16 +1761,16 @@ export class PostgresIdentityStore implements IdentityStore {
   }
 
   async verifyPatToken(token: string): Promise<VerifiedPat> {
-    // Step 1–2: structural decode.
-    if (!token.startsWith("pat_")) throw new InvalidPatTokenError();
-    if (token.length < 4 + 32 + 1 + 1) throw new InvalidPatTokenError();
+    // Step 1–2: structural decode. security-audit-v0.3.md L3: delegate
+    // to the canonical helper rather than re-implementing the regex
+    // here — the helper is the one driven by the spec conformance
+    // fixture so any drift surfaces immediately.
+    if (!isStructurallyValidPatToken(token)) throw new InvalidPatTokenError();
     const idHex = token.slice(4, 36);
-    if (!/^[0-9a-f]{32}$/.test(idHex)) throw new InvalidPatTokenError();
-    if (token[36] !== "_") throw new InvalidPatTokenError();
     const secretSegment = token.slice(37);
     // security-audit-v0.3.md H6: cap on secret-segment length —
     // see in-memory.ts for rationale. Reject before Argon2id dispatch.
-    if (secretSegment.length === 0 || secretSegment.length > PAT_MAX_SECRET_LENGTH) {
+    if (secretSegment.length > PAT_MAX_SECRET_LENGTH) {
       throw new InvalidPatTokenError();
     }
     const patId = `pat_${idHex}` as PatId;
