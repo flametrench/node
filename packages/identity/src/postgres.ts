@@ -1812,7 +1812,10 @@ export class PostgresIdentityStore implements IdentityStore {
         this.patLastUsedCoalesceSeconds;
     if (shouldUpdate) {
       await this.pool.query(
-        `UPDATE pat SET last_used_at = $1 WHERE id = $2`,
+        // security-audit-v0.3.md H3: re-check revoked_at IS NULL so
+        // a race with revokePat does not write last_used_at onto an
+        // already-revoked row.
+        `UPDATE pat SET last_used_at = $1 WHERE id = $2 AND revoked_at IS NULL`,
         [now, patUuid],
       );
     }
