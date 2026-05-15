@@ -3,7 +3,7 @@
 All notable changes to `@flametrench/identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
-## [v0.3.0] — Unreleased
+## [v0.3.0] — 2026-05-15
 
 ### Added (personal access tokens, ADR 0016)
 - New PAT primitive shared across both stores. Surface:

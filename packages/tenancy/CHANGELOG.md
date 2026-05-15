@@ -3,6 +3,11 @@
 All notable changes to `@flametrench/tenancy` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.3.0] — 2026-05-15
+
+### Changed (release-process)
+- Version bumped from `0.2.1` to `0.3.0` for SDK matrix uniformity at the v0.3.0 cut. **No surface changes vs `v0.2.1`** — the tenancy SDK had no v0.3 spec work (PATs and Postgres rule-eval live in `@flametrench/identity` and `@flametrench/authz` respectively). Bumping in lockstep keeps the per-family matrix (`ids` / `identity` / `tenancy` / `authz`) at a single version for adopters reasoning about cross-package compatibility. Tag `v0.3.0` of `flametrench/node` reflects this.
+
 ## [v0.2.1] — 2026-05-01
 
 ### Fixed (release-process)

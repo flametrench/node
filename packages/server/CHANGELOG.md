@@ -3,7 +3,7 @@
 All notable changes to `@flametrench/server` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
-## [v0.0.3] — Unreleased
+## [v0.0.3] — 2026-05-15
 
 ### Added (bearer prefix dispatch, ADR 0016)
 - New `resolveBearer(token, { identityStore, shareStore? })` helper for routing incoming bearer tokens to the matching verifier. Implements the prefix-routing contract from ADR 0016: `pat_<32hex>_<…>` → `verifyPatToken`, `shr_<…>` → `verifyShareToken`, anything else → `verifySessionToken`. Returns a discriminated union with the `kind` field aligned to the `auth.kind` audit discriminator (`"session" | "pat" | "share"`).

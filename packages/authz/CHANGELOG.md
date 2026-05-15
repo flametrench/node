@@ -3,7 +3,7 @@
 All notable changes to `@flametrench/authz` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
-## [v0.3.0] — Unreleased
+## [v0.3.0] — 2026-05-15
 
 ### Added (Postgres rewrite-rule evaluation, ADR 0017)
 - `PostgresTupleStore` constructor accepts a new optional `rules` parameter mirroring `InMemoryTupleStore`. When set, `check()` evaluates rewrite rules via iterative async expansion against Postgres (one indexed SELECT per direct lookup; recursive over `computed_userset`; one SELECT per `tuple_to_userset` enumeration). Cycle detection, depth + fan-out bounds, and short-circuit semantics from ADR 0007 are preserved verbatim.
