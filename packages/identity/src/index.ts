@@ -13,6 +13,8 @@ export type {
   CreatePasswordCredentialInput,
   CreatePasskeyCredentialInput,
   CreateOidcCredentialInput,
+  CreatePatInput,
+  CreatePatResult,
   CreateSessionInput,
   CreateSessionResult,
   CreateUserInput,
@@ -21,10 +23,14 @@ export type {
   CredId,
   FindCredentialInput,
   ListOptions,
+  ListPatsOptions,
   ListUsersOptions,
   OidcCredential,
   Page,
   PasskeyCredential,
+  PatId,
+  PatStatus,
+  PersonalAccessToken,
   PasswordCredential,
   RotateCredentialInput,
   RotatePasswordInput,
@@ -37,6 +43,7 @@ export type {
   User,
   UsrId,
   VerifiedCredentialResult,
+  VerifiedPat,
   VerifyPasswordInput,
 } from "./types.js";
 export { ARGON2ID_FLOOR } from "./types.js";
@@ -102,11 +109,24 @@ export {
   DuplicateCredentialError,
   IdentityError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
+
+// v0.3 — PAT wire-format utilities (ADR 0016)
+export {
+  classifyBearer,
+  isStructurallyValidPatToken,
+  PAT_DUMMY_PHC_HASH,
+  PAT_MAX_LIFETIME_SECONDS,
+  PAT_MAX_SECRET_LENGTH,
+  type AuthKind,
+} from "./pat.js";
 
 // v0.2 — WebAuthn assertion verification (Proposed; ADR 0008)
 export {

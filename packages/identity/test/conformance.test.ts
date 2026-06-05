@@ -22,6 +22,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyBearer,
+  isStructurallyValidPatToken,
   isValidRecoveryCode,
   totpCompute,
   verifyPasswordHash,
@@ -184,6 +186,40 @@ for (const path of [
         it(`[${t.id}] ${t.description}`, () => {
           const actual = runWebauthn(shared, t);
           expect(actual).toEqual(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.3: identity.verify_pat_token — wire-format structural validation ───
+
+{
+  const fixture = loadFixture("identity/pat/token-format.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · token-format`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { token: string };
+          expect(isStructurallyValidPatToken(input.token)).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
+
+// ─── v0.3: identity.resolve_bearer — bearer prefix dispatch ───
+
+{
+  const fixture = loadFixture("identity/pat/bearer-prefix-routing.json");
+  describe(
+    `Conformance · ${fixture.capability}.${fixture.operation} [${fixture.conformance_level}] · bearer-prefix-routing`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { token: string };
+          expect(classifyBearer(input.token)).toBe(t.expected.result);
         });
       }
     },

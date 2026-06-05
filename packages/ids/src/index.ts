@@ -7,7 +7,7 @@ import { InvalidIdError, InvalidTypeError } from "./errors.js";
 export { InvalidIdError, InvalidTypeError };
 
 /**
- * Registered type prefixes for Flametrench v0.1.
+ * Registered type prefixes for Flametrench.
  *
  * Keep this map synchronized with the Flametrench specification's
  * reserved prefix registry at:
@@ -28,6 +28,8 @@ export const TYPES = {
   mfa: "mfa_factor",
   // v0.2 — Proposed (ADR 0012)
   shr: "share_token",
+  // v0.3 — Proposed (ADR 0016)
+  pat: "personal_access_token",
 } as const satisfies Record<string, string>;
 
 export type IdType = keyof typeof TYPES;

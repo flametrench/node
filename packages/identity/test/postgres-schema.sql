@@ -342,7 +342,7 @@ CREATE INDEX inv_pending_idx  ON inv (identifier) WHERE status = 'pending';
 CREATE TABLE tup (
     id            UUID PRIMARY KEY,
     subject_type  TEXT NOT NULL
-                    CHECK (subject_type IN ('usr')),
+                    CHECK (subject_type ~ '^[a-z]{2,6}$'),
     subject_id    UUID NOT NULL,
     relation      TEXT NOT NULL
                     CHECK (relation ~ '^[a-z_]{2,32}$'),
@@ -688,6 +688,31 @@ CREATE INDEX shr_expires_idx ON shr (expires_at)
     WHERE revoked_at IS NULL;
 
 -- ===========================================================================
+-- v0.3: personal access tokens (ADR 0016)
+-- ===========================================================================
+
+CREATE TABLE pat (
+    id            UUID PRIMARY KEY,
+    usr_id        UUID NOT NULL REFERENCES usr(id),
+    name          TEXT NOT NULL
+                    CHECK (octet_length(name) >= 1 AND char_length(name) <= 120),
+    scope         TEXT[] NOT NULL DEFAULT '{}',
+    secret_hash   TEXT NOT NULL,
+    expires_at    TIMESTAMPTZ,
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (expires_at IS NULL OR expires_at > created_at),
+    CHECK (expires_at IS NULL OR expires_at <= created_at + INTERVAL '365 days'),
+    CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+);
+
+CREATE INDEX pat_usr_idx ON pat (usr_id);
+CREATE INDEX pat_usr_created_idx ON pat (usr_id, created_at ASC, id ASC);
+
+-- ===========================================================================
 -- v0.2 note: rewrite rules (ADR 0007)
 -- ===========================================================================
 --
@@ -727,6 +752,10 @@ CREATE TRIGGER mem_touch  BEFORE UPDATE ON mem
 CREATE TRIGGER mfa_touch              BEFORE UPDATE ON mfa
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 CREATE TRIGGER usr_mfa_policy_touch   BEFORE UPDATE ON usr_mfa_policy
+    FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
+
+-- v0.3:
+CREATE TRIGGER pat_touch BEFORE UPDATE ON pat
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 
 -- ses, inv, and tup are append-only / lifecycle-terminal; no updated_at.
