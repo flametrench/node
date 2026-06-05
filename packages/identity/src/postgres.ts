@@ -41,11 +41,20 @@ import {
   CredentialTypeMismatchError,
   DuplicateCredentialError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
+import {
+  PAT_DUMMY_PHC_HASH,
+  PAT_MAX_LIFETIME_SECONDS,
+  PAT_MAX_SECRET_LENGTH,
+  isStructurallyValidPatToken,
+} from "./pat.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
 import {
   DEFAULT_TOTP_ALGORITHM,
@@ -79,6 +88,8 @@ import { webauthnVerifyAssertion } from "./webauthn.js";
 import {
   ARGON2ID_FLOOR,
   type CreateCredentialInput,
+  type CreatePatInput,
+  type CreatePatResult,
   type CreateSessionInput,
   type CreateSessionResult,
   type CreateUserInput,
@@ -86,8 +97,12 @@ import {
   type Credential,
   type FindCredentialInput,
   type ListOptions,
+  type ListPatsOptions,
   type ListUsersOptions,
   type Page,
+  type PatId,
+  type PatStatus,
+  type PersonalAccessToken,
   type RotateCredentialInput,
   type SesId,
   type Session,
@@ -96,6 +111,7 @@ import {
   type User,
   type UsrId,
   type VerifiedCredentialResult,
+  type VerifiedPat,
   type VerifyPasswordInput,
 } from "./types.js";
 
@@ -194,7 +210,38 @@ interface UsrMfaPolicyRow {
   updated_at: Date;
 }
 
+interface PatRow {
+  id: string;
+  usr_id: string;
+  name: string;
+  scope: string[];
+  expires_at: Date | null;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 // ─── Mappers ───
+
+function rowToPat(r: PatRow, knownUsrId: UsrId | null, now: Date): PersonalAccessToken {
+  const usrId = knownUsrId ?? (encode("usr", r.usr_id) as UsrId);
+  let status: PatStatus = "active";
+  if (r.revoked_at !== null) status = "revoked";
+  else if (r.expires_at !== null && now >= r.expires_at) status = "expired";
+  return {
+    id: encode("pat", r.id) as PatId,
+    usrId,
+    name: r.name,
+    scope: r.scope,
+    status,
+    expiresAt: r.expires_at,
+    lastUsedAt: r.last_used_at,
+    revokedAt: r.revoked_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
 
 function rowToUser(r: UsrRow): User {
   return {
@@ -1573,6 +1620,146 @@ export class PostgresIdentityStore implements IdentityStore {
         "pending_factor_expired",
       );
     }
+  }
+
+  // ─── v0.3 Personal access tokens (ADR 0016) ───
+
+  async createPat(input: CreatePatInput): Promise<CreatePatResult> {
+    const usrUuid = decode(input.usrId).uuid;
+    const nameLen = [...input.name].length;
+    if (nameLen < 1 || nameLen > 120) {
+      throw new PreconditionError("name must be 1–120 code units", "invalid_name");
+    }
+    const now = this.now();
+    if (input.expiresAt != null) {
+      const maxExpiry = new Date(now.getTime() + PAT_MAX_LIFETIME_SECONDS * 1000);
+      if (input.expiresAt > maxExpiry) {
+        throw new PreconditionError("expiresAt exceeds 365-day cap", "expires_too_late");
+      }
+      if (input.expiresAt <= now) {
+        throw new PreconditionError("expiresAt must be in the future", "expires_in_past");
+      }
+    }
+    const patUuid = decode(generate("pat")).uuid;
+    const patId = encode("pat", patUuid) as PatId;
+    const secretBytes = randomBytes(32);
+    const secret = secretBytes.toString("base64url");
+    const hash = await argon2.hash(secret, {
+      type: argon2.argon2id,
+      memoryCost: ARGON2ID_FLOOR.memoryCost,
+      timeCost: ARGON2ID_FLOOR.timeCost,
+      parallelism: ARGON2ID_FLOOR.parallelism,
+    });
+    const token = `${patId}_${secret}`;
+    const scope = input.scope ?? [];
+    const { rows } = await this.pool.query<PatRow>(
+      `INSERT INTO pat (id, usr_id, name, scope, secret_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at`,
+      [patUuid, usrUuid, input.name, scope, hash, input.expiresAt ?? null],
+    );
+    const pat = rowToPat(rows[0]!, input.usrId, now);
+    return { pat, token };
+  }
+
+  async getPat(patId: PatId): Promise<PersonalAccessToken> {
+    const patUuid = decode(patId).uuid;
+    const { rows } = await this.pool.query<PatRow>(
+      `SELECT id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at
+       FROM pat WHERE id = $1`,
+      [patUuid],
+    );
+    if (rows.length === 0) throw new NotFoundError(`PAT ${patId} not found`);
+    return rowToPat(rows[0]!, null, this.now());
+  }
+
+  async listPatsForUser(
+    usrId: UsrId,
+    options: ListPatsOptions = {},
+  ): Promise<Page<PersonalAccessToken>> {
+    const usrUuid = decode(usrId).uuid;
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const params: unknown[] = [usrUuid];
+    let where = "usr_id = $1";
+    if (options.cursor) {
+      const cursorUuid = decode(options.cursor as PatId).uuid;
+      params.push(cursorUuid);
+      where += ` AND (created_at, id) > (SELECT created_at, id FROM pat WHERE id = $${params.length})`;
+    }
+    params.push(limit + 1);
+    const { rows } = await this.pool.query<PatRow>(
+      `SELECT id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at
+       FROM pat WHERE ${where}
+       ORDER BY created_at ASC, id ASC LIMIT $${params.length}`,
+      params,
+    );
+    const now = this.now();
+    const data = rows.slice(0, limit).map((r) => rowToPat(r, null, now));
+    const nextCursor = rows.length > limit ? (data[data.length - 1]?.id ?? null) : null;
+    return { data, nextCursor };
+  }
+
+  async verifyPatToken(token: string): Promise<VerifiedPat> {
+    if (!isStructurallyValidPatToken(token)) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, token).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    const parts = token.split("_");
+    if (parts.length < 3) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, token).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    const patId = `${parts[0]}_${parts[1]}` as PatId;
+    const secret = parts.slice(2).join("_");
+    if (secret.length > PAT_MAX_SECRET_LENGTH) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, "").catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    const patUuid = decode(patId).uuid;
+    const { rows } = await this.pool.query<{
+      usr_id: string;
+      secret_hash: string;
+      expires_at: Date | null;
+      revoked_at: Date | null;
+      scope: string[];
+    }>(
+      `SELECT usr_id, secret_hash, expires_at, revoked_at, scope FROM pat WHERE id = $1`,
+      [patUuid],
+    );
+    if (rows.length === 0) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, secret).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    const r = rows[0]!;
+    if (r.revoked_at !== null) throw new PatRevokedError(patId);
+    const now = this.now();
+    if (r.expires_at !== null && now >= r.expires_at) throw new PatExpiredError(patId);
+    const ok = await argon2.verify(r.secret_hash, secret);
+    if (!ok) throw new InvalidPatTokenError();
+    // Coalesced last_used_at — best-effort, discard errors.
+    const threshold = new Date(now.getTime() - 60 * 1000);
+    await this.pool
+      .query(
+        `UPDATE pat SET last_used_at = $2
+         WHERE id = $1 AND revoked_at IS NULL
+           AND (last_used_at IS NULL OR last_used_at < $3)`,
+        [patUuid, now, threshold],
+      )
+      .catch(() => {});
+    return { patId, usrId: encode("usr", r.usr_id) as UsrId, scope: r.scope };
+  }
+
+  async revokePat(patId: PatId): Promise<PersonalAccessToken> {
+    const patUuid = decode(patId).uuid;
+    const now = this.now();
+    const { rows } = await this.pool.query<PatRow>(
+      `UPDATE pat SET revoked_at = COALESCE(revoked_at, $2)
+       WHERE id = $1
+       RETURNING id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at`,
+      [patUuid, now],
+    );
+    if (rows.length === 0) throw new NotFoundError(`PAT ${patId} not found`);
+    return rowToPat(rows[0]!, null, now);
   }
 }
 

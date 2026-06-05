@@ -12,11 +12,20 @@ import {
   CredentialTypeMismatchError,
   DuplicateCredentialError,
   InvalidCredentialError,
+  InvalidPatTokenError,
   InvalidTokenError,
   NotFoundError,
+  PatExpiredError,
+  PatRevokedError,
   PreconditionError,
   SessionExpiredError,
 } from "./errors.js";
+import {
+  PAT_DUMMY_PHC_HASH,
+  PAT_MAX_LIFETIME_SECONDS,
+  PAT_MAX_SECRET_LENGTH,
+  isStructurallyValidPatToken,
+} from "./pat.js";
 import { hashPassword, verifyPasswordHash } from "./hashing.js";
 import {
   generateRecoveryCodes,
@@ -47,6 +56,8 @@ import { webauthnVerifyAssertion } from "./webauthn.js";
 import {
   ARGON2ID_FLOOR,
   type CreateCredentialInput,
+  type CreatePatInput,
+  type CreatePatResult,
   type CreateSessionInput,
   type CreateSessionResult,
   type CreateUserInput,
@@ -55,9 +66,13 @@ import {
   type CredentialType,
   type FindCredentialInput,
   type ListOptions,
+  type ListPatsOptions,
   type ListUsersOptions,
   type Page,
   type PasskeyCredential,
+  type PatId,
+  type PersonalAccessToken,
+  type PatStatus,
   type PasswordCredential,
   type OidcCredential,
   type RotateCredentialInput,
@@ -67,6 +82,7 @@ import {
   type UpdateUserInput,
   type User,
   type UsrId,
+  type VerifiedPat,
   type VerifyPasswordInput,
   type VerifiedCredentialResult,
 } from "./types.js";
@@ -142,6 +158,11 @@ export class InMemoryIdentityStore implements IdentityStore {
   private readonly activeCredByIdentifier = new Map<string, CredId>();
   /** Secondary index: bearer-token-hash → sesId. */
   private readonly sessionByTokenHash = new Map<string, SesId>();
+  // ─── PAT storage ───
+  private readonly pats = new Map<PatId, PersonalAccessToken>();
+  private readonly patSecretHashes = new Map<PatId, string>();
+  /** Last-used timestamp for coalescing (skip redundant Argon2id writes). */
+  private readonly patLastUsedAt = new Map<PatId, Date>();
   private readonly clock: () => Date;
 
   constructor(options: InMemoryIdentityStoreOptions = {}) {
@@ -160,6 +181,9 @@ export class InMemoryIdentityStore implements IdentityStore {
   }
   private newSesId(): SesId {
     return generate("ses") as SesId;
+  }
+  private newPatId(): PatId {
+    return generate("pat") as PatId;
   }
 
   private identifierKey(type: CredentialType, identifier: string): string {
@@ -320,6 +344,17 @@ export class InMemoryIdentityStore implements IdentityStore {
       }
     }
     this.cascadeRevokeSessionsForUser(usrId);
+    // Cascade: revoke all active PATs belonging to this user (ADR 0016).
+    for (const [patId, pat] of this.pats.entries()) {
+      if (pat.usrId === usrId && pat.revokedAt === null) {
+        this.pats.set(patId, {
+          ...pat,
+          status: "revoked" as PatStatus,
+          revokedAt: now,
+          updatedAt: now,
+        });
+      }
+    }
     const updated: User = { ...u, status: "revoked", updatedAt: now };
     this.users.set(usrId, updated);
     return updated;
@@ -1094,6 +1129,161 @@ export class InMemoryIdentityStore implements IdentityStore {
     };
     this.mfaPolicies.set(input.usrId, policy);
     return policy;
+  }
+
+  // ─── v0.3 Personal access tokens (ADR 0016) ───
+
+  async createPat(input: CreatePatInput): Promise<CreatePatResult> {
+    const user = this.users.get(input.usrId);
+    if (!user) throw new NotFoundError(`User ${input.usrId} not found`);
+    const nameLen = [...input.name].length;
+    if (nameLen < 1 || nameLen > 120) {
+      throw new PreconditionError("name must be 1–120 code units", "invalid_name");
+    }
+    const now = this.now();
+    if (input.expiresAt != null) {
+      const maxExpiry = new Date(now.getTime() + PAT_MAX_LIFETIME_SECONDS * 1000);
+      if (input.expiresAt > maxExpiry) {
+        throw new PreconditionError("expiresAt exceeds 365-day cap", "expires_too_late");
+      }
+      if (input.expiresAt <= now) {
+        throw new PreconditionError("expiresAt must be in the future", "expires_in_past");
+      }
+    }
+    const patId = this.newPatId();
+    const secretBytes = randomBytes(32);
+    const secret = secretBytes.toString("base64url");
+    const hash = await argon2.hash(secret, {
+      type: argon2.argon2id,
+      memoryCost: ARGON2ID_FLOOR.memoryCost,
+      timeCost: ARGON2ID_FLOOR.timeCost,
+      parallelism: ARGON2ID_FLOOR.parallelism,
+    });
+    const token = `${patId}_${secret}`;
+    const pat: PersonalAccessToken = {
+      id: patId,
+      usrId: input.usrId,
+      name: input.name,
+      scope: [...input.scope],
+      status: "active",
+      expiresAt: input.expiresAt ?? null,
+      lastUsedAt: null,
+      revokedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.pats.set(patId, pat);
+    this.patSecretHashes.set(patId, hash);
+    return { pat, token };
+  }
+
+  async getPat(patId: PatId): Promise<PersonalAccessToken> {
+    const pat = this.pats.get(patId);
+    if (!pat) throw new NotFoundError(`PAT ${patId} not found`);
+    return pat;
+  }
+
+  async listPatsForUser(
+    usrId: UsrId,
+    options: ListPatsOptions = {},
+  ): Promise<Page<PersonalAccessToken>> {
+    if (!this.users.has(usrId)) {
+      throw new NotFoundError(`User ${usrId} not found`);
+    }
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const all = [...this.pats.values()]
+      .filter((p) => p.usrId === usrId)
+      .sort((a, b) => {
+        const t = a.createdAt.getTime() - b.createdAt.getTime();
+        return t !== 0 ? t : a.id < b.id ? -1 : 1;
+      });
+    let startIdx = 0;
+    if (options.cursor) {
+      startIdx = all.findIndex((p) => p.id === options.cursor) + 1;
+      if (startIdx === 0) startIdx = all.length;
+    }
+    const slice = all.slice(startIdx, startIdx + limit);
+    const nextCursor =
+      startIdx + limit < all.length && slice.length > 0
+        ? slice[slice.length - 1]!.id
+        : null;
+    return { data: slice, nextCursor };
+  }
+
+  async verifyPatToken(token: string): Promise<VerifiedPat> {
+    // Step 1: structural check.
+    if (!isStructurallyValidPatToken(token)) {
+      // Run dummy verify to keep wall-clock indistinguishable (H2).
+      await argon2.verify(PAT_DUMMY_PHC_HASH, token).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    // Step 2: split into pat_<id> and secret.
+    const parts = token.split("_");
+    // token = "pat_<32hex>_<secret>" — 3 underscore-delimited segments.
+    if (parts.length < 3) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, token).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+    const patId = `${parts[0]}_${parts[1]}` as PatId;
+    const secret = parts.slice(2).join("_");
+
+    // H6: length cap before Argon2id.
+    if (secret.length > PAT_MAX_SECRET_LENGTH) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, "").catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+
+    // Step 3: lookup.
+    const pat = this.pats.get(patId);
+    if (!pat) {
+      await argon2.verify(PAT_DUMMY_PHC_HASH, secret).catch(() => {});
+      throw new InvalidPatTokenError();
+    }
+
+    // Step 4: revoked check.
+    if (pat.revokedAt !== null) {
+      throw new PatRevokedError(patId);
+    }
+    // Step 5: expiry check.
+    if (pat.expiresAt !== null && this.now() >= pat.expiresAt) {
+      throw new PatExpiredError(patId);
+    }
+
+    // Step 6: Argon2id verify.
+    const hash = this.patSecretHashes.get(patId)!;
+    const ok = await argon2.verify(hash, secret);
+    if (!ok) {
+      throw new InvalidPatTokenError();
+    }
+
+    // Step 7: coalesced last_used_at update.
+    const now = this.now();
+    const prevLastUsed = this.patLastUsedAt.get(patId);
+    const COALESCE_SECONDS = 60;
+    if (!prevLastUsed || now.getTime() - prevLastUsed.getTime() >= COALESCE_SECONDS * 1000) {
+      const current = this.pats.get(patId);
+      if (current && current.revokedAt === null) {
+        this.pats.set(patId, { ...current, lastUsedAt: now, updatedAt: now });
+        this.patLastUsedAt.set(patId, now);
+      }
+    }
+
+    return { patId, usrId: pat.usrId, scope: [...pat.scope] };
+  }
+
+  async revokePat(patId: PatId): Promise<PersonalAccessToken> {
+    const pat = this.pats.get(patId);
+    if (!pat) throw new NotFoundError(`PAT ${patId} not found`);
+    if (pat.revokedAt !== null) return pat;
+    const now = this.now();
+    const revoked: PersonalAccessToken = {
+      ...pat,
+      status: "revoked",
+      revokedAt: now,
+      updatedAt: now,
+    };
+    this.pats.set(patId, revoked);
+    return revoked;
   }
 }
 

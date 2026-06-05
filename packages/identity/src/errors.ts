@@ -89,3 +89,29 @@ export class CredentialTypeMismatchError extends IdentityError {
     this.name = "CredentialTypeMismatchError";
   }
 }
+
+// ─── v0.3 PAT errors (ADR 0016) ───
+
+/** The PAT bearer token is structurally invalid or the secret did not match. */
+export class InvalidPatTokenError extends IdentityError {
+  constructor(message = "Invalid PAT token") {
+    super(message, "unauthorized.invalid_pat_token");
+    this.name = "InvalidPatTokenError";
+  }
+}
+
+/** The PAT has been revoked. */
+export class PatRevokedError extends IdentityError {
+  constructor(public readonly patId: string) {
+    super(`PAT ${patId} has been revoked`, "unauthorized.pat_revoked");
+    this.name = "PatRevokedError";
+  }
+}
+
+/** The PAT has expired. */
+export class PatExpiredError extends IdentityError {
+  constructor(public readonly patId: string) {
+    super(`PAT ${patId} has expired`, "unauthorized.pat_expired");
+    this.name = "PatExpiredError";
+  }
+}

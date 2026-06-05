@@ -235,6 +235,52 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
+// ─── Personal access tokens (v0.3, ADR 0016) ───
+
+export type PatId = `pat_${string}`;
+
+export type PatStatus = "active" | "expired" | "revoked";
+
+export interface PersonalAccessToken {
+  id: PatId;
+  usrId: UsrId;
+  /** Human-readable label; 1–120 Unicode code units. */
+  name: string;
+  /** Adopter-defined scope claims; may be empty. */
+  scope: string[];
+  status: PatStatus;
+  expiresAt: Date | null;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Success result of {@link IdentityStore.verifyPatToken}. */
+export interface VerifiedPat {
+  patId: PatId;
+  usrId: UsrId;
+  scope: string[];
+}
+
+export interface CreatePatInput {
+  usrId: UsrId;
+  name: string;
+  scope: string[];
+  expiresAt?: Date | null;
+}
+
+export interface CreatePatResult {
+  pat: PersonalAccessToken;
+  /** Plaintext bearer token — only returned here; never persisted. */
+  token: string;
+}
+
+export interface ListPatsOptions {
+  cursor?: string;
+  limit?: number;
+}
+
 // ─── Argon2id parameter floors (spec-required) ───
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "@flametrench/ids",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Prefixed wire-format IDs for Flametrench. UUIDv7 storage, self-describing public identifiers.",
   "license": "Apache-2.0",
   "author": {

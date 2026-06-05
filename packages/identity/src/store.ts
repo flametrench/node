@@ -14,6 +14,8 @@ import type {
 } from "./mfa.js";
 import type {
   CreateCredentialInput,
+  CreatePatInput,
+  CreatePatResult,
   CreateSessionInput,
   CreateSessionResult,
   CreateUserInput,
@@ -21,8 +23,11 @@ import type {
   CredId,
   FindCredentialInput,
   ListOptions,
+  ListPatsOptions,
   ListUsersOptions,
   Page,
+  PatId,
+  PersonalAccessToken,
   RotateCredentialInput,
   SesId,
   Session,
@@ -30,6 +35,7 @@ import type {
   User,
   UsrId,
   VerifiedCredentialResult,
+  VerifiedPat,
   VerifyPasswordInput,
 } from "./types.js";
 
@@ -128,6 +134,26 @@ export interface IdentityStore {
   /** Returns null when the user has no policy row. */
   getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null>;
   setMfaPolicy(input: SetMfaPolicyInput): Promise<UserMfaPolicy>;
+
+  // ─── v0.3 Personal access tokens (ADR 0016) ───
+
+  /**
+   * Mint a new PAT. Returns both the persisted record and the plaintext
+   * bearer token — the ONLY time the secret is visible; it is not stored.
+   */
+  createPat(input: CreatePatInput): Promise<CreatePatResult>;
+  getPat(patId: PatId): Promise<PersonalAccessToken>;
+  listPatsForUser(usrId: UsrId, options?: ListPatsOptions): Promise<Page<PersonalAccessToken>>;
+
+  /**
+   * Verify a PAT bearer token per ADR 0016 §"Verification semantics".
+   * Throws InvalidPatTokenError, PatRevokedError, or PatExpiredError.
+   * Atomically updates last_used_at on success.
+   */
+  verifyPatToken(token: string): Promise<VerifiedPat>;
+
+  /** Soft-revoke. Idempotent — already-revoked PATs return as-is. */
+  revokePat(patId: PatId): Promise<PersonalAccessToken>;
 }
 
 export interface EnrollWebAuthnFactorInput {
