@@ -971,6 +971,9 @@ export class PostgresIdentityStore implements IdentityStore {
       [input.identifier],
     );
     if (rows.length === 0 || rows[0]!.password_hash === null) {
+      // Timing-oracle defense: run a decoy verify so missing-identifier requests
+      // take the same wall-clock time as wrong-password requests (CWE-208).
+      await verifyPasswordHash(PAT_DUMMY_PHC_HASH, input.password);
       throw new InvalidCredentialError(`Invalid credential`);
     }
     const cred = rows[0]!;

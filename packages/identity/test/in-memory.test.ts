@@ -1,7 +1,9 @@
 // Copyright 2026 NDC Digital, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import argon2 from "argon2";
 
 import {
   AlreadyTerminalError,
@@ -12,6 +14,7 @@ import {
   InvalidCredentialError,
   InvalidTokenError,
   NotFoundError,
+  PAT_DUMMY_PHC_HASH,
   PreconditionError,
   SessionExpiredError,
   type PasswordCredential,
@@ -290,6 +293,22 @@ describe("InMemoryIdentityStore", () => {
           password: "anything",
         }),
       ).rejects.toThrow(InvalidCredentialError);
+    });
+
+    it("verifyPassword runs decoy argon2 verify on unknown identifier to prevent timing oracle (CWE-208)", async () => {
+      // argon2 is CJS; vi.spyOn on its shared module object intercepts calls
+      // from verifyPasswordHash in hashing.ts.
+      const spy = vi.spyOn(argon2, "verify");
+      await expect(
+        store.verifyPassword({
+          type: "password",
+          identifier: "ghost@example.com",
+          password: "irrelevant",
+        }),
+      ).rejects.toThrow(InvalidCredentialError);
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy.mock.calls[0]![0]).toBe(PAT_DUMMY_PHC_HASH);
+      spy.mockRestore();
     });
 
     // ─── ADR 0008: usr_mfa_policy gate on verifyPassword ───
