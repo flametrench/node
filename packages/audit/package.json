@@ -1,0 +1,61 @@
+{
+  "name": "@flametrench/audit",
+  "version": "0.4.0",
+  "description": "Audit primitive for Flametrench: append-only, identity- and tenancy-aware action logging. ADR 0019.",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "NDC Digital, LLC",
+    "url": "https://flametrench.dev"
+  },
+  "homepage": "https://github.com/flametrench/node",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flametrench/node.git",
+    "directory": "packages/audit"
+  },
+  "bugs": {
+    "url": "https://github.com/flametrench/node/issues"
+  },
+  "keywords": [
+    "flametrench",
+    "audit",
+    "audit-log",
+    "append-only",
+    "compliance"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@flametrench/ids": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build",
+    "prepublishOnly": "node ../../scripts/assert-pnpm.mjs"
+  }
+}
