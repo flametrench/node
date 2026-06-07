@@ -9,6 +9,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -23,5 +25,3 @@ jobs:
       - run: pnpm publish --filter "@flametrench/identity" --access public --no-git-checks
       - run: pnpm publish --filter "@flametrench/tenancy" --access public --no-git-checks
       - run: pnpm publish --filter "@flametrench/authz" --access public --no-git-checks
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
