@@ -4,16 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       package:
-        description: 'Package to publish ("all" for full v0.3 cohort, or a single package name)'
+        description: 'Package to publish ("all" for full v0.4 cohort, or a single package name)'
         required: true
-        default: '@flametrench/identity'
+        default: 'all'
         type: choice
         options:
-          - '@flametrench/identity'
           - all
           - '@flametrench/ids'
-          - '@flametrench/tenancy'
-          - '@flametrench/authz'
+          - '@flametrench/audit'
+          - '@flametrench/file'
+          - '@flametrench/flags'
+          - '@flametrench/notify'
 
 jobs:
   publish:
@@ -34,23 +35,26 @@ jobs:
       - run: pnpm install
       - run: pnpm build
 
+      # v0.4 cohort — publish in dependency order: ids first, then the four primitives.
+      # identity/tenancy/authz are already live on npm (0.3.x) and are NOT in this batch.
       # --access public is required for all @flametrench/* scoped packages.
-      # pnpm publish defaults to --tag latest for stable (non-prerelease) versions,
-      # so 0.3.1 will land on latest and displace 0.2.1 automatically.
-      # Publish in dependency order: ids → identity → tenancy → authz.
 
       - name: Publish @flametrench/ids
         if: inputs.package == 'all' || inputs.package == '@flametrench/ids'
         run: pnpm publish --filter "@flametrench/ids" --access public --no-git-checks
 
-      - name: Publish @flametrench/identity (v0.3.1 — CWE-208 security fix)
-        if: inputs.package == 'all' || inputs.package == '@flametrench/identity'
-        run: pnpm publish --filter "@flametrench/identity" --access public --no-git-checks
+      - name: Publish @flametrench/audit
+        if: inputs.package == 'all' || inputs.package == '@flametrench/audit'
+        run: pnpm publish --filter "@flametrench/audit" --access public --no-git-checks
 
-      - name: Publish @flametrench/tenancy
-        if: inputs.package == 'all' || inputs.package == '@flametrench/tenancy'
-        run: pnpm publish --filter "@flametrench/tenancy" --access public --no-git-checks
+      - name: Publish @flametrench/file
+        if: inputs.package == 'all' || inputs.package == '@flametrench/file'
+        run: pnpm publish --filter "@flametrench/file" --access public --no-git-checks
 
-      - name: Publish @flametrench/authz
-        if: inputs.package == 'all' || inputs.package == '@flametrench/authz'
-        run: pnpm publish --filter "@flametrench/authz" --access public --no-git-checks
+      - name: Publish @flametrench/flags
+        if: inputs.package == 'all' || inputs.package == '@flametrench/flags'
+        run: pnpm publish --filter "@flametrench/flags" --access public --no-git-checks
+
+      - name: Publish @flametrench/notify
+        if: inputs.package == 'all' || inputs.package == '@flametrench/notify'
+        run: pnpm publish --filter "@flametrench/notify" --access public --no-git-checks
