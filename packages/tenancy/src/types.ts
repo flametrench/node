@@ -219,6 +219,17 @@ export interface ListMembersOptions {
   status?: Status;
 }
 
+/** Options for {@link TenancyStore.listOrgs}. Per ADR 0025. */
+export interface ListOrgsOptions {
+  cursor?: string;
+  /** Page size; clamped to [1, 200]. Default 50. */
+  limit?: number;
+  /** Case-insensitive substring filter over org `name` OR `slug`. */
+  query?: string;
+  /** Filter by org status. */
+  status?: Status;
+}
+
 export interface ListInvitationsOptions {
   cursor?: string;
   limit?: number;

@@ -36,6 +36,7 @@ export type {
   InvitationStatus,
   ListInvitationsOptions,
   ListMembersOptions,
+  ListOrgsOptions,
   MemId,
   Membership,
   Organization,

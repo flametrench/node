@@ -14,6 +14,7 @@ import type {
   InvId,
   ListInvitationsOptions,
   ListMembersOptions,
+  ListOrgsOptions,
   MemId,
   Membership,
   Organization,
@@ -77,6 +78,8 @@ export interface TenancyStore {
   suspendOrg(orgId: OrgId): Promise<Organization>;
   reinstateOrg(orgId: OrgId): Promise<Organization>;
   revokeOrg(orgId: OrgId): Promise<Organization>;
+  /** v0.4 (ADR 0025) — cross-org enumeration. Caller MUST gate to admin/system. */
+  listOrgs(options?: ListOrgsOptions): Promise<Page<Organization>>;
 
   // ─── Memberships ───
 

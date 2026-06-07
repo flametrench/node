@@ -46,9 +46,11 @@ import {
   PreconditionError,
   RoleHierarchyError,
   SoleOwnerError,
+  type ListOrgsOptions,
   type MemId,
   type OrgId,
   type Role,
+  type Status,
   type UsrId,
 } from "../src/index.js";
 
@@ -288,6 +290,16 @@ async function invokeOp(
     case "revoke_org":
       return store.revokeOrg(args.org_id as OrgId);
 
+    case "list_orgs": {
+      const opts: ListOrgsOptions = {};
+      if ("status" in args) opts.status = args.status as Status;
+      if ("query" in args) opts.query = args.query as string;
+      if ("limit" in args) opts.limit = args.limit as number;
+      if ("cursor" in args) opts.cursor = args.cursor as string;
+      // Wrap in { page } so capture paths like "page.next_cursor" resolve correctly.
+      return { page: await store.listOrgs(opts) };
+    }
+
     // Harness-only assertion pseudo-ops.
     case "assert_subject_relations": {
       const tuples = await store.listTuplesForSubject(
@@ -345,6 +357,25 @@ async function runTest(test: FixtureTest): Promise<void> {
         variables[name] = walkPath(result, path);
       }
     }
+
+    // Page-result assertions (used by list_* ops).
+    const expectedResult = step.expected?.result as Record<string, unknown> | undefined;
+    if (expectedResult) {
+      // list_orgs wraps its result as { page }; unwrap if present.
+      const pageObj = (result as Record<string, unknown>).page ?? result;
+      const page = pageObj as { data: Array<{ id: string }>; nextCursor: string | null };
+      if ("data_ids_in_order" in expectedResult) {
+        const ids = (resolveVars(expectedResult.data_ids_in_order, variables) as string[]);
+        expect(page.data.map((x) => x.id)).toEqual(ids);
+      }
+      if ("data_ids_unordered" in expectedResult) {
+        const ids = (resolveVars(expectedResult.data_ids_unordered, variables) as string[]).sort();
+        expect(page.data.map((x) => x.id).sort()).toEqual(ids);
+      }
+      if ("next_cursor" in expectedResult) {
+        expect(page.nextCursor).toBe(expectedResult.next_cursor ?? null);
+      }
+    }
   }
 
   // "Completed without error" sentinel for tests that do mutations only.
@@ -361,6 +392,7 @@ for (const [name, file] of [
   ["tenancy.accept_invitation", "tenancy/invitation-accept.json"],
   ["tenancy.accept_invitation.binding", "tenancy/invitation-accept-binding.json"],
   ["tenancy.update_org", "tenancy/org-name-slug.json"],
+  ["tenancy.list_orgs", "tenancy/list-orgs.json"],
 ] as const) {
   const fixture = loadFixture(file);
   describe(`Conformance · ${name} [${fixture.conformance_level}]`, () => {
