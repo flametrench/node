@@ -6,14 +6,14 @@ Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/
 ## [v0.3.1] — 2026-06-06
 
 ### Fixed (security)
-- **Timing oracle in `verifyPassword` (GHSA-33cx-f9xx-h6ff):** v0.3.0 was tagged with the vulnerability (CWE-208: timing oracle in credential lookup), but never published to npm. v0.3.1 is the first npm release and contains the fix — the method now uses a dummy Argon2id hash to mask failed lookups. Adopters need not take action; pin `@flametrench/identity@^0.3.1` or later.
+- **Timing oracle in `verifyPassword` (GHSA-XXXX-XXXX-XXXX):** Fixes a user-enumeration timing oracle (CWE-208) present in all releases `< 0.3.1` (0.2.0, 0.2.1, and v0.3.0). The method did not use a dummy Argon2id hash when credential lookups failed, allowing attackers to determine user existence through timing analysis. v0.3.1 is the first fixed npm release. Adopters on 0.2.x should upgrade immediately. See advisory for details.
 
 ## [v0.3.0] — 2026-06-05
 
-*This version was tagged but never published to npm due to a security vulnerability in `verifyPassword`. Do not use; all npm users received v0.3.1 as the first release.*
+*v0.3.0 was tagged but never published to npm. No users affected on npm by this tag; all npm users were on 0.2.x until 0.3.1.*
 
-### Released (unpublished due to security issue)
-- v0.3 stable cutoff. Tagged but not published to npm (security issue in `verifyPassword`; see v0.3.1 entry). No users affected.
+### Released (unpublished to npm)
+- v0.3 stable cutoff. Tagged but not published to npm (security issue in `verifyPassword` existed; see v0.3.1 entry).
 
 ## [v0.2.1] — 2026-05-01
 
