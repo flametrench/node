@@ -3,6 +3,11 @@
 All notable changes to `@flametrench/identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.3.0] — 2026-06-05
+
+### Released
+- v0.3 stable cutoff. Shipped with timing-oracle fix for `verifyPassword` (GHSA-33cx-f9xx-h6ff): the method uses a dummy Argon2id hash to mask credential lookup failures, preventing timing-based user enumeration attacks. This vulnerability existed in other SDK families (PHP v0.0.1–v0.3.0, Python/Java first releases already fixed) — Node v0.3.0 is the first npm publish and already contains the fix. Adopters need not take action; this is the base version to pin.
+
 ## [v0.2.1] — 2026-05-01
 
 ### Fixed (release-process)
