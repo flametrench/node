@@ -85,6 +85,7 @@ import type {
   Invitation,
   ListInvitationsOptions,
   ListMembersOptions,
+  ListOrgsOptions,
   MemId,
   Membership,
   Organization,
@@ -560,6 +561,39 @@ export class PostgresTenancyStore implements TenancyStore {
       );
       return rowToOrg(updated[0]!);
     });
+  }
+
+  async listOrgs(options: ListOrgsOptions = {}): Promise<Page<Organization>> {
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+    const params: unknown[] = [];
+    const conditions: string[] = [];
+    if (options.status) {
+      params.push(options.status);
+      conditions.push(`status = $${params.length}`);
+    }
+    if (options.query) {
+      params.push(options.query);
+      conditions.push(
+        `(name ILIKE '%' || $${params.length} || '%' OR slug ILIKE '%' || $${params.length} || '%')`,
+      );
+    }
+    if (options.cursor) {
+      params.push(wireToUuid(options.cursor));
+      conditions.push(`id > $${params.length}`);
+    }
+    params.push(limit + 1);
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const { rows } = await this.pool.query<OrgRow>(
+      `SELECT id, status, name, slug, created_at, updated_at FROM org
+       ${where}
+       ORDER BY id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    const hasMore = rows.length > limit;
+    const data = rows.slice(0, limit).map(rowToOrg);
+    const nextCursor = hasMore ? (data[data.length - 1]?.id ?? null) : null;
+    return { data, nextCursor };
   }
 
   // ─── Memberships ───

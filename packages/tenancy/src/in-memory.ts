@@ -38,6 +38,7 @@ import type {
   Page,
   PreTuple,
   RevokeInvitationInput,
+  ListOrgsOptions,
   SelfLeaveInput,
   Status,
   TransferOwnershipInput,
@@ -302,6 +303,20 @@ export class InMemoryTenancyStore implements TenancyStore {
     const updated: Organization = { ...org, status: "revoked", updatedAt: now };
     this.orgs.set(orgId, updated);
     return updated;
+  }
+
+  async listOrgs(options: ListOrgsOptions = {}): Promise<Page<Organization>> {
+    const query = options.query?.toLowerCase();
+    const all = [...this.orgs.values()]
+      .filter((o) => (options.status ? o.status === options.status : true))
+      .filter((o) => {
+        if (!query) return true;
+        const name = (o.name ?? "").toLowerCase();
+        const slug = (o.slug ?? "").toLowerCase();
+        return name.includes(query) || slug.includes(query);
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+    return this.paginate(all, options);
   }
 
   // ─── Memberships ───
