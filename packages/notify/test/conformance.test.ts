@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Flametrench v0.4 conformance suite — Node / TypeScript harness for
-// the notifications capability (ADR 0022).
+// the notifications capability (ADR 0022, Option 2).
 //
 // Fixture format: step-DSL with {varname} interpolation and captures.
 // Result matching is SUPERSET (result ⊇ expected).
 // Dates are serialized to ISO strings via toWire() before comparison.
+//
+// Harness note: lifecycle-shape.json ops (get/mark_read/mark_unread/dismiss)
+// omit recipient_usr_id in their inputs — that field is landing shortly in
+// a lifecycle-shape update. Until then the harness falls back to vars.recipient
+// so the positive lifecycle vectors continue to pass unchanged.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -132,7 +137,12 @@ async function invokeOp(
   store: InMemoryNotifyStore,
   op: string,
   raw: Record<string, unknown>,
+  vars: Record<string, unknown>,
 ): Promise<unknown> {
+  // recipient_usr_id fallback: lifecycle-shape ops omit it pending fixture update.
+  // Falls back to vars.recipient so positive lifecycle vectors pass unchanged.
+  const recipientUsrId = (raw.recipient_usr_id ?? vars["recipient"]) as UsrId;
+
   switch (op) {
     case "create_notification": {
       const n = await store.createNotification({
@@ -145,24 +155,31 @@ async function invokeOp(
       return toWire(n);
     }
     case "get_notification": {
-      const n = await store.getNotification(raw.id as NotId);
+      const n = await store.getNotification(raw.id as NotId, recipientUsrId);
       return toWire(n);
     }
     case "mark_read": {
-      const n = await store.markRead(raw.id as NotId);
+      const n = await store.markRead(raw.id as NotId, recipientUsrId);
       return toWire(n);
     }
     case "mark_unread": {
-      const n = await store.markUnread(raw.id as NotId);
+      const n = await store.markUnread(raw.id as NotId, recipientUsrId);
       return toWire(n);
     }
     case "dismiss": {
-      const n = await store.dismiss(raw.id as NotId);
+      const n = await store.dismiss(raw.id as NotId, recipientUsrId);
       return toWire(n);
     }
     default:
       throw new Error(`Unknown fixture op: ${op}`);
   }
+}
+
+// ─── Error class name resolver ───
+
+function getErrorClassName(err: unknown): string {
+  if (err instanceof Error) return err.constructor.name;
+  return String(err);
 }
 
 // ─── Test runner ───
@@ -174,7 +191,17 @@ async function runTest(test: FixtureTest): Promise<void> {
 
   for (const step of test.steps) {
     const input = resolveVars(step.input, vars) as Record<string, unknown>;
-    const result = await invokeOp(store, step.op, input);
+
+    if (step.expected?.error) {
+      // Negative vector: expect a specific error class
+      await expect(invokeOp(store, step.op, input, vars)).rejects.toSatisfy(
+        (err: unknown) => getErrorClassName(err) === step.expected!.error!,
+        `Expected ${step.expected.error} from op ${step.op}`,
+      );
+      continue;
+    }
+
+    const result = await invokeOp(store, step.op, input, vars);
 
     if (step.captures) {
       for (const [name, path] of Object.entries(step.captures)) {
@@ -192,12 +219,25 @@ async function runTest(test: FixtureTest): Promise<void> {
 
 // ─── Test factories ───
 
-const fixture = JSON.parse(
-  readFileSync(join(FIXTURES_DIR, "notifications/lifecycle-shape.json"), "utf8"),
-) as FixtureFile;
+function loadFixture(name: string): FixtureFile {
+  return JSON.parse(
+    readFileSync(join(FIXTURES_DIR, name), "utf8"),
+  ) as FixtureFile;
+}
 
-describe(`Conformance · notifications.lifecycle [${fixture.conformance_level}]`, () => {
-  for (const t of fixture.tests) {
+const lifecycleFixture = loadFixture("notifications/lifecycle-shape.json");
+const recipientScopeFixture = loadFixture("notifications/recipient-scope.json");
+
+describe(`Conformance · notifications.lifecycle [${lifecycleFixture.conformance_level}]`, () => {
+  for (const t of lifecycleFixture.tests) {
+    it(`[${t.id}] ${t.description}`, async () => {
+      await runTest(t);
+    });
+  }
+});
+
+describe(`Conformance · notifications.recipient_scope [${recipientScopeFixture.conformance_level}]`, () => {
+  for (const t of recipientScopeFixture.tests) {
     it(`[${t.id}] ${t.description}`, async () => {
       await runTest(t);
     });

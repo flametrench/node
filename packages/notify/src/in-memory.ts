@@ -9,6 +9,7 @@ import type {
   CreateNotificationInput,
   Notification,
   NotId,
+  NotificationState,
   OrgId,
   UsrId,
 } from "./types.js";
@@ -45,14 +46,18 @@ function validateCreate(input: CreateNotificationInput): void {
 }
 
 /**
- * Reference in-memory implementation of NotifyStore (ADR 0022).
+ * Reference in-memory implementation of NotifyStore (ADR 0022, Option 2).
  *
  * Suitable for tests and in-memory prototyping. Not durable across
  * process restarts.
  *
- * Recipient-scope / existence non-disclosure: all lookup operations use
- * `getOrThrow` which raises `NotFoundError` for both missing and
- * cross-recipient notifications — no differential.
+ * Recipient-scope / existence non-disclosure (SDK-enforced):
+ * - All lookup ops take `recipientUsrId` and scope internally.
+ * - `getOrThrow` raises `NotFoundError` for both missing AND cross-recipient
+ *   notifications — no presence/error-code differential.
+ * - Ownership check resolves BEFORE state-machine validation (PreconditionError)
+ *   so a foreign already-dismissed notification raises `NotFoundError`,
+ *   not `PreconditionError`.
  */
 export class InMemoryNotifyStore implements NotifyStore {
   private readonly notifications = new Map<NotId, Notification>();
@@ -76,12 +81,13 @@ export class InMemoryNotifyStore implements NotifyStore {
     return notification;
   }
 
-  async getNotification(id: NotId): Promise<Notification> {
-    return this.getOrThrow(id);
+  async getNotification(id: NotId, recipientUsrId: UsrId): Promise<Notification> {
+    return this.getOrThrow(id, recipientUsrId);
   }
 
-  async markRead(id: NotId): Promise<Notification> {
-    const n = this.getOrThrow(id);
+  async markRead(id: NotId, recipientUsrId: UsrId): Promise<Notification> {
+    // Ownership check (→ NotFoundError) BEFORE state check (→ PreconditionError).
+    const n = this.getOrThrow(id, recipientUsrId);
     if (n.state === "dismissed") {
       throw new PreconditionError(`Cannot transition a dismissed notification (id: ${id})`);
     }
@@ -90,8 +96,8 @@ export class InMemoryNotifyStore implements NotifyStore {
     return updated;
   }
 
-  async markUnread(id: NotId): Promise<Notification> {
-    const n = this.getOrThrow(id);
+  async markUnread(id: NotId, recipientUsrId: UsrId): Promise<Notification> {
+    const n = this.getOrThrow(id, recipientUsrId);
     if (n.state === "dismissed") {
       throw new PreconditionError(`Cannot transition a dismissed notification (id: ${id})`);
     }
@@ -100,8 +106,8 @@ export class InMemoryNotifyStore implements NotifyStore {
     return updated;
   }
 
-  async dismiss(id: NotId): Promise<Notification> {
-    const n = this.getOrThrow(id);
+  async dismiss(id: NotId, recipientUsrId: UsrId): Promise<Notification> {
+    const n = this.getOrThrow(id, recipientUsrId);
     if (n.state === "dismissed") {
       throw new PreconditionError(`Cannot transition a dismissed notification (id: ${id})`);
     }
@@ -110,9 +116,22 @@ export class InMemoryNotifyStore implements NotifyStore {
     return updated;
   }
 
-  private getOrThrow(id: NotId): Notification {
+  async countUnread(recipientUsrId: UsrId, scope: string): Promise<number> {
+    let count = 0;
+    for (const n of this.notifications.values()) {
+      if (n.recipientUsrId === recipientUsrId && n.scope === scope && (n.state as NotificationState) === "unread") {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private getOrThrow(id: NotId, recipientUsrId: UsrId): Notification {
     const n = this.notifications.get(id);
-    if (!n) throw new NotFoundError(`Notification not found: ${id}`);
+    // Treat missing and cross-recipient identically — no existence differential.
+    if (!n || n.recipientUsrId !== recipientUsrId) {
+      throw new NotFoundError(`Notification not found: ${id}`);
+    }
     return n;
   }
 }
