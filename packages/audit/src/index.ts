@@ -32,4 +32,4 @@ export type { AuditStore } from "./store.js";
 
 export { InMemoryAuditStore } from "./in-memory.js";
 
-export { AuditError, NotFoundError } from "./errors.js";
+export { AuditError, InvalidFormatError, NotFoundError, PreconditionError } from "./errors.js";
