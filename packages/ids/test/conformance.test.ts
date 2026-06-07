@@ -166,3 +166,20 @@ function errorCtorForSpecName(name: string) {
     },
   );
 }
+
+// ─── ids.registered_prefixes (v0.4 guard) ───
+
+{
+  const fixture = loadFixture("ids/registered-prefixes.json");
+  describe(
+    `Conformance · ${fixture.capability}.registered_prefixes [${fixture.conformance_level}]`,
+    () => {
+      for (const t of fixture.tests) {
+        it(`[${t.id}] ${t.description}`, () => {
+          const input = t.input as { id: string };
+          expect(typeOf(input.id)).toBe(t.expected.result);
+        });
+      }
+    },
+  );
+}
