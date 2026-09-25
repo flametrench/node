@@ -77,6 +77,22 @@ jobs:
           path: packages/*/coverage/coverage-summary.json
           if-no-files-found: warn
 
+  publish-guards:
+    name: Publish-path guard scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Test tarball workspace-specifier assertion
+        run: node --test scripts/assert-tarball-workspace-specifiers.test.mjs
+
   conformance-drift:
     name: Conformance fixtures match upstream spec
     runs-on: ubuntu-latest
