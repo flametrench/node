@@ -17,43 +17,88 @@ on:
           - '@flametrench/notify'
 
 jobs:
+  # Builds and packs tarballs. Deliberately uncredentialed: this job runs
+  # `pnpm install` and package build scripts (arbitrary third-party code via
+  # transitive deps), so it must never see NPM_TOKEN or any other secret.
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      # v0.4 cohort — ids first, then the four primitives that depend on it
+      # via `workspace:*`. identity/tenancy/authz are already live on npm
+      # (0.3.x) and are NOT in this batch.
+      - name: Pack packages
+        env:
+          PACKAGE_INPUT: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          mkdir -p tarballs
+          declare -A pkg_dirs=(
+            ["@flametrench/ids"]=packages/ids
+            ["@flametrench/audit"]=packages/audit
+            ["@flametrench/file"]=packages/file
+            ["@flametrench/flags"]=packages/flags
+            ["@flametrench/notify"]=packages/notify
+          )
+          for name in "@flametrench/ids" "@flametrench/audit" "@flametrench/file" "@flametrench/flags" "@flametrench/notify"; do
+            if [ "$PACKAGE_INPUT" = "all" ] || [ "$PACKAGE_INPUT" = "$name" ]; then
+              pnpm --dir "${pkg_dirs[$name]}" pack --pack-destination "$GITHUB_WORKSPACE/tarballs"
+            fi
+          done
+          ls -l tarballs
+
+      # pnpm pack rewrites `workspace:*` deps (e.g. audit/file/flags/notify
+      # -> @flametrench/ids) to real published versions. This is the same
+      # invariant scripts/assert-pnpm.mjs (a prepublishOnly hook) protects —
+      # but prepublishOnly never runs when the publish job later does
+      # `npm publish <tgz>` on an already-built tarball, so we assert it
+      # explicitly here, before anything gets uploaded.
+      - name: 'Assert no workspace: specifiers leaked into tarballs'
+        run: node scripts/assert-tarball-workspace-specifiers.mjs tarballs/*.tgz
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tarballs
+          path: tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the already-built tarballs. Checks out nothing and installs
+  # nothing — no third-party code runs in the credentialed job, only
+  # `npm publish` against pre-built artifacts from the uncredentialed build
+  # job above. Actions here are pinned to full commit SHAs.
   publish:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org/'
-          cache: 'pnpm'
-      - run: pnpm install
-      - run: pnpm build
 
-      # v0.4 cohort — publish in dependency order: ids first, then the four primitives.
-      # identity/tenancy/authz are already live on npm (0.3.x) and are NOT in this batch.
-      # --access public is required for all @flametrench/* scoped packages.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tarballs
+          path: tarballs
 
-      - name: Publish @flametrench/ids
-        if: inputs.package == 'all' || inputs.package == '@flametrench/ids'
-        run: pnpm publish --filter "@flametrench/ids" --access public --no-git-checks
-
-      - name: Publish @flametrench/audit
-        if: inputs.package == 'all' || inputs.package == '@flametrench/audit'
-        run: pnpm publish --filter "@flametrench/audit" --access public --no-git-checks
-
-      - name: Publish @flametrench/file
-        if: inputs.package == 'all' || inputs.package == '@flametrench/file'
-        run: pnpm publish --filter "@flametrench/file" --access public --no-git-checks
-
-      - name: Publish @flametrench/flags
-        if: inputs.package == 'all' || inputs.package == '@flametrench/flags'
-        run: pnpm publish --filter "@flametrench/flags" --access public --no-git-checks
-
-      - name: Publish @flametrench/notify
-        if: inputs.package == 'all' || inputs.package == '@flametrench/notify'
-        run: pnpm publish --filter "@flametrench/notify" --access public --no-git-checks
+      - name: Publish tarballs
+        run: |
+          set -euo pipefail
+          for tgz in tarballs/*.tgz; do
+            echo "Publishing $tgz"
+            npm publish "$tgz" --access public
+          done
