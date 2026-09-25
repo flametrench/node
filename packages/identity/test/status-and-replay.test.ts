@@ -159,6 +159,20 @@ function suite(name: string, makeStore: MakeStore): void {
       await expect(store.verifyPatToken(token)).rejects.toBeInstanceOf(PatRevokedError);
     });
 
+    it("revokeUser's PAT cascade succeeds when the app clock lags the PAT's created_at", async () => {
+      // Postgres stamps pat.created_at with the DB clock and revoked_at with the
+      // app clock; CHECK (revoked_at >= created_at) must not roll back the revoke.
+      const store = await makeStore(() => new Date("2000-01-01T00:00:00Z"));
+      const user = await store.createUser({});
+      const { pat } = await store.createPat({ usrId: user.id, name: "ci", scope: [] });
+      const before = await store.getPat(pat.id);
+      await store.revokeUser(user.id);
+      const after = await store.getPat(pat.id);
+      expect(after.revokedAt).not.toBeNull();
+      expect(after.revokedAt!.getTime()).toBeGreaterThanOrEqual(before.createdAt.getTime());
+      expect((await store.getUser(user.id)).status).toBe("revoked");
+    });
+
     it("a refused createPat for a revoked user creates no PAT", async () => {
       const store = await makeStore(() => new Date());
       const user = await store.createUser({});
