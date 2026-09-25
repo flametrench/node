@@ -74,16 +74,14 @@ jobs:
           retention-days: 1
 
   # Publishes the already-built tarballs. Checks out nothing and installs
-  # nothing — no third-party code runs in the credentialed job, only
-  # `npm publish` against pre-built artifacts from the uncredentialed build
-  # job above. Actions here are pinned to full commit SHAs.
+  # nothing: no package code or lifecycle scripts run here. The only
+  # third-party code is the two SHA-pinned actions, and NPM_TOKEN is scoped
+  # to the publish step alone so neither action sees it.
   publish:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -96,6 +94,8 @@ jobs:
           path: tarballs
 
       - name: Publish tarballs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           for tgz in tarballs/*.tgz; do
