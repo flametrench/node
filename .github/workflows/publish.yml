@@ -4,13 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       package:
-        description: 'Package to publish ("all" for full v0.4 cohort, or a single package name)'
+        description: 'Package to publish ("all" for every package below, or a single package name)'
         required: true
         default: 'all'
         type: choice
         options:
           - all
           - '@flametrench/ids'
+          - '@flametrench/identity'
+          - '@flametrench/tenancy'
+          - '@flametrench/authz'
           - '@flametrench/audit'
           - '@flametrench/file'
           - '@flametrench/flags'
@@ -38,9 +41,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
 
-      # v0.4 cohort — ids first, then the four primitives that depend on it
-      # via `workspace:*`. identity/tenancy/authz are already live on npm
-      # (0.3.x) and are NOT in this batch.
+      # ids first; every other package depends on it via `workspace:*`.
       - name: Pack packages
         env:
           PACKAGE_INPUT: ${{ inputs.package }}
@@ -49,19 +50,22 @@ jobs:
           mkdir -p tarballs
           declare -A pkg_dirs=(
             ["@flametrench/ids"]=packages/ids
+            ["@flametrench/identity"]=packages/identity
+            ["@flametrench/tenancy"]=packages/tenancy
+            ["@flametrench/authz"]=packages/authz
             ["@flametrench/audit"]=packages/audit
             ["@flametrench/file"]=packages/file
             ["@flametrench/flags"]=packages/flags
             ["@flametrench/notify"]=packages/notify
           )
-          for name in "@flametrench/ids" "@flametrench/audit" "@flametrench/file" "@flametrench/flags" "@flametrench/notify"; do
+          for name in "@flametrench/ids" "@flametrench/identity" "@flametrench/tenancy" "@flametrench/authz" "@flametrench/audit" "@flametrench/file" "@flametrench/flags" "@flametrench/notify"; do
             if [ "$PACKAGE_INPUT" = "all" ] || [ "$PACKAGE_INPUT" = "$name" ]; then
               pnpm --dir "${pkg_dirs[$name]}" pack --pack-destination "$GITHUB_WORKSPACE/tarballs"
             fi
           done
           ls -l tarballs
 
-      # pnpm pack rewrites `workspace:*` deps (e.g. audit/file/flags/notify
+      # pnpm pack rewrites `workspace:*` deps (every package here except ids
       # -> @flametrench/ids) to real published versions. This is the same
       # invariant scripts/assert-pnpm.mjs (a prepublishOnly hook) protects —
       # but prepublishOnly never runs when the publish job later does
@@ -102,11 +106,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          # Dependency order, not glob order: audit/file/flags/notify pin
+          # Dependency order, not glob order: every other package pins
           # @flametrench/ids exactly, so ids must be live before them.
           ordered=()
-          for pkg in ids audit file flags notify; do
-            for tgz in tarballs/flametrench-"$pkg"-[0-9]*.tgz; do
+          for pkg in ids identity tenancy authz audit file flags notify; do
+            # "./" is required: npm reads a bare "tarballs/x.tgz" as a GitHub
+            # owner/repo shorthand, not a file.
+            for tgz in ./tarballs/flametrench-"$pkg"-[0-9]*.tgz; do
               [ -e "$tgz" ] && ordered+=("$tgz")
             done
           done
