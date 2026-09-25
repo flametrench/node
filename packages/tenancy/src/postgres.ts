@@ -1251,6 +1251,21 @@ export class PostgresTenancyStore implements TenancyStore {
         [wireToUuid(input.invId)],
       );
       if (res.rows.length === 0) throw new NotFoundError(`Invitation ${input.invId} not found`);
+      // docs/tenancy.md: subject to admin authorization on the invitation's
+      // own org. Checked before the status so a non-admin learns nothing;
+      // FOR SHARE holds off a concurrent suspension of that membership.
+      const adminRes = await c.query<{ role: string }>(
+        `SELECT role FROM mem
+         WHERE usr_id = $1 AND org_id = $2 AND status = 'active'
+         FOR SHARE`,
+        [wireToUuid(input.adminUsrId), res.rows[0]!.org_id],
+      );
+      const role = adminRes.rows[0]?.role;
+      if (role !== "owner" && role !== "admin") {
+        throw new ForbiddenError(
+          `Not authorized to revoke invitation ${input.invId}`,
+        );
+      }
       if (res.rows[0]!.status !== "pending") {
         throw new InvitationNotPendingError(
           `Invitation ${input.invId} is ${res.rows[0]!.status}`,
