@@ -1,0 +1,220 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "enroll_recovery_factor",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md#recovery-code-semantics",
+  "description": "Re-enrolling recovery codes after the set is EXHAUSTED replaces it (ADR 0008 \u00a7Verification flow: 'A user with all 10 codes consumed has no recovery available; re-enrollment generates a fresh set and revokes the old'; \u00a7Recovery code semantics: 'Re-enrolling generates a fresh set; the old `mfa_` row is revoked per ADR 0005'). Asserts ONLY that accepted case: consume all 10 codes, re-enroll \u2192 exactly one active recovery factor, the old one revoked, the new one `replaces` it. Deliberately does NOT assert re-enrollment over an UNEXHAUSTED set (the accepted text does not say whether that replaces or is refused; current SDKs refuse). Harness pseudo-ops: `assert_active_mfa_factors` (count of `active` factors of `type` for `usr_id`), `assert_mfa_factor_fields` (`status`/`replaces` on one factor). CONFIDENTIAL until patched SDKs ship (security package 86akpr9pb, Go recovery sets).",
+  "tests": [
+    {
+      "id": "recovery.first_set_code_verifies",
+      "description": "Standalone known positive (harness wiring): enroll recovery codes once and verify one code (ADR 0008 \u00a7Verification flow). Passes on today's code; proves the harness path independently of the re-enrollment bug.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_recovery_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "c0": "codes.0"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c0}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "recovery.re_enroll_after_exhaustion_replaces_set",
+      "description": "Consume all 10 codes, re-enroll: exactly one active recovery factor remains, the exhausted one is revoked, the new one replaces it, and a code from the new set verifies (known positive).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_recovery_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "first_id": "factor.id",
+            "c0": "codes.0",
+            "c1": "codes.1",
+            "c2": "codes.2",
+            "c3": "codes.3",
+            "c4": "codes.4",
+            "c5": "codes.5",
+            "c6": "codes.6",
+            "c7": "codes.7",
+            "c8": "codes.8",
+            "c9": "codes.9"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c0}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c1}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c2}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c3}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c4}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c5}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c6}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c7}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c8}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{c9}"
+            }
+          }
+        },
+        {
+          "op": "enroll_recovery_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "second_id": "factor.id",
+            "n0": "codes.0"
+          }
+        },
+        {
+          "op": "assert_active_mfa_factors",
+          "input": {
+            "usr_id": "{usr_id}",
+            "type": "recovery",
+            "expected_count": 1
+          }
+        },
+        {
+          "op": "assert_mfa_factor_fields",
+          "input": {
+            "mfa_id": "{first_id}",
+            "expected_status": "revoked"
+          }
+        },
+        {
+          "op": "assert_mfa_factor_fields",
+          "input": {
+            "mfa_id": "{second_id}",
+            "expected_status": "active",
+            "expected_replaces": "{first_id}"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "recovery",
+              "code": "{n0}"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

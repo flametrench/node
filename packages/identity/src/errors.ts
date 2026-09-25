@@ -42,6 +42,17 @@ export class InvalidCredentialError extends IdentityError {
   }
 }
 
+/**
+ * A TOTP code verified cryptographically but its time-step is not newer than
+ * the factor's last accepted step (ADR 0008 replay protection).
+ */
+export class ReplayedTotpError extends IdentityError {
+  constructor(message = "TOTP code has already been used") {
+    super(message, "unauthorized.replayed_totp");
+    this.name = "ReplayedTotpError";
+  }
+}
+
 /** The referenced credential exists but is not active (suspended or revoked). */
 export class CredentialNotActiveError extends IdentityError {
   constructor(message: string) {

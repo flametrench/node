@@ -77,6 +77,7 @@ export {
   normalizeRecoveryInput,
   totpCompute,
   totpOtpauthUri,
+  totpMatchStep,
   totpVerify,
   type Factor,
   type FactorStatus,
@@ -115,6 +116,7 @@ export {
   PatExpiredError,
   PatRevokedError,
   PreconditionError,
+  ReplayedTotpError,
   SessionExpiredError,
 } from "./errors.js";
 
