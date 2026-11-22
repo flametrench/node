@@ -758,6 +758,14 @@ export class InMemoryTenancyStore implements TenancyStore {
 
   async revokeInvitation(input: RevokeInvitationInput): Promise<Invitation> {
     const inv = await this.getInvitation(input.invId);
+    // docs/tenancy.md: subject to admin authorization on the invitation's
+    // own org. Checked before the status so a non-admin learns nothing.
+    const admin = this.findActiveMembership(input.adminUsrId, inv.orgId);
+    if (!admin || (admin.role !== "owner" && admin.role !== "admin")) {
+      throw new ForbiddenError(
+        `Not authorized to revoke invitation ${input.invId}`,
+      );
+    }
     if (inv.status !== "pending") {
       throw new InvitationNotPendingError(
         `Invitation ${input.invId} is ${inv.status}, not pending`,
