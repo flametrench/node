@@ -186,15 +186,20 @@ function suite(name: string, makeStore: MakeStore): void {
       expect((await store.listPatsForUser(user.id)).data).toHaveLength(0);
     });
 
-    it("createPat for a suspended user is refused (ADR 0029)", async () => {
-      const store = await makeStore(() => new Date());
-      const user = await store.createUser({});
-      await store.suspendUser(user.id);
-      await expect(
-        store.createPat({ usrId: user.id, name: "ci", scope: [] }),
-      ).rejects.toBeInstanceOf(PreconditionError);
-      expect(await store.listPatsForUser(user.id)).toEqual({ data: [], nextCursor: null });
-    });
+    for (const status of ["suspended", "revoked"] as const) {
+      it(`createPat for a ${status} user is refused with precondition.user_not_active`, async () => {
+        const store = await makeStore(() => new Date());
+        const user = await store.createUser({});
+        if (status === "suspended") await store.suspendUser(user.id);
+        else await store.revokeUser(user.id);
+        const err = await store
+          .createPat({ usrId: user.id, name: "ci", scope: [] })
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(PreconditionError);
+        expect((err as PreconditionError).code).toBe("precondition.user_not_active");
+        expect(await store.listPatsForUser(user.id)).toEqual({ data: [], nextCursor: null });
+      });
+    }
 
     it("a suspended user's valid recovery code is refused and stays unconsumed", async () => {
       const store = await makeStore(() => new Date());

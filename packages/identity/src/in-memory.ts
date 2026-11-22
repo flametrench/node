@@ -1211,7 +1211,7 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (ownerStatus !== "active") {
       throw new PreconditionError(
         `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
-        `user_${ownerStatus}`,
+        "user_not_active",
       );
     }
     const pat: PersonalAccessToken = {

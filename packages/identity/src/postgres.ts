@@ -1739,7 +1739,7 @@ export class PostgresIdentityStore implements IdentityStore {
       if (ownerStatus !== "active") {
         throw new PreconditionError(
           `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
-          `user_${ownerStatus}`,
+          "user_not_active",
         );
       }
       const { rows } = await c.query<PatRow>(
