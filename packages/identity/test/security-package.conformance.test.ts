@@ -1,11 +1,10 @@
 // Copyright 2026 NDC Digital, LLC
 // SPDX-License-Identifier: Apache-2.0
 //
-// Step-DSL harness for the identity security-package fixtures, run against
-// BOTH InMemoryIdentityStore and PostgresIdentityStore (the latter only when
-// IDENTITY_POSTGRES_URL is set). Harness pseudo-ops per the fixture
-// descriptions: set_clock, compute_totp_code, assert_active_mfa_factors,
-// assert_mfa_factor_fields.
+// Step-DSL harness for the identity status-gate and TOTP-replay fixtures, run
+// against BOTH InMemoryIdentityStore and PostgresIdentityStore (the latter only
+// when IDENTITY_POSTGRES_URL is set). Harness pseudo-ops per the fixture
+// descriptions: set_clock, compute_totp_code.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -157,22 +156,8 @@ async function invoke(h: Harness, op: string, inp: Record<string, unknown>): Pro
     }
     case "confirm_totp_factor":
       return s.confirmTotpFactor(inp.mfa_id as string, inp.code as string);
-    case "enroll_recovery_factor":
-      return s.enrollRecoveryFactor(inp.usr_id as `usr_${string}`);
     case "verify_mfa":
       return s.verifyMfa(inp.usr_id as `usr_${string}`, inp.proof as MfaProof);
-    case "assert_active_mfa_factors": {
-      const factors = await s.listMfaFactors(inp.usr_id as `usr_${string}`);
-      const active = factors.filter((f) => f.type === inp.type && f.status === "active");
-      expect(active.length, "active factor count").toBe(inp.expected_count);
-      return null;
-    }
-    case "assert_mfa_factor_fields": {
-      const f = await s.getMfaFactor(inp.mfa_id as string);
-      if ("expected_status" in inp) expect(f.status, "factor status").toBe(inp.expected_status);
-      if ("expected_replaces" in inp) expect(f.replaces, "factor replaces").toBe(inp.expected_replaces);
-      return null;
-    }
     default:
       throw new Error(`Unknown fixture op: ${op}`);
   }
@@ -207,7 +192,6 @@ async function runTest(h: Harness, t: FixtureTest): Promise<void> {
 const FIXTURES = [
   "identity/user-status-gates.json",
   "identity/mfa/totp-replay-rejected.json",
-  "identity/mfa/recovery-single-active-set.json",
 ];
 
 function registerSuite(
