@@ -1120,6 +1120,15 @@ export class PostgresIdentityStore implements IdentityStore {
     if (r.token_hash === null || !timingSafeBufferEqual(tokenHash, r.token_hash)) {
       throw new InvalidTokenError(`Invalid token`);
     }
+    // ADR 0029: a non-active owner's session is refused, conflated with any
+    // other invalid token.
+    const owner = await this.pool.query<{ status: string }>(
+      `SELECT status FROM usr WHERE id = $1`,
+      [r.usr_id],
+    );
+    if (owner.rows[0]?.status !== "active") {
+      throw new InvalidTokenError(`Invalid token`);
+    }
     if (r.revoked_at !== null) {
       throw new SessionExpiredError(`Session is revoked`);
     }
@@ -1132,13 +1141,31 @@ export class PostgresIdentityStore implements IdentityStore {
   async refreshSession(sesId: SesId): Promise<CreateSessionResult> {
     return this.tx(async (c) => {
       const uuid = wireToUuid(sesId);
+      // ADR 0029: lock usr FOR SHARE before ses FOR UPDATE, the same usr->ses
+      // order as suspendUser/revokeUser. A concurrent suspension then either
+      // commits first (this refresh is refused) or waits and its session
+      // cascade sees the new session.
+      const head = await c.query<{ usr_id: string }>(
+        `SELECT usr_id FROM ses WHERE id = $1`,
+        [uuid],
+      );
+      if (head.rows.length === 0) {
+        throw new NotFoundError(`Session ${sesId} not found`);
+      }
+      const owner = await c.query<{ status: string }>(
+        `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
+        [head.rows[0]!.usr_id],
+      );
+      if (owner.rows[0]?.status !== "active") {
+        throw new PreconditionError(
+          `User is not active; cannot refresh session ${sesId}`,
+          "user_not_active",
+        );
+      }
       const cur = await c.query<SesRow>(
         `SELECT ${SES_COLS} FROM ses WHERE id = $1 FOR UPDATE`,
         [uuid],
       );
-      if (cur.rows.length === 0) {
-        throw new NotFoundError(`Session ${sesId} not found`);
-      }
       const old = cur.rows[0]!;
       if (old.revoked_at !== null) {
         throw new SessionExpiredError(`Session is already revoked`);
@@ -1519,7 +1546,7 @@ export class PostgresIdentityStore implements IdentityStore {
     });
     if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
     return this.tx(async (c) => {
-      await this.assertMfaUserActive(c, r.usr_id);
+      await this.assertMfaUserActive(c, r.usr_id, "TOTP code did not verify");
       // ADR 0027 replay protection: reject any step <= the last accepted
       // step. Check-and-advance is one conditional UPDATE, so two concurrent
       // verifies of the same code cannot both succeed.
@@ -1569,7 +1596,7 @@ export class PostgresIdentityStore implements IdentityStore {
         clientDataJson: proof.clientDataJson,
         signature: proof.signature,
       });
-      await this.assertMfaUserActive(c, userUuid);
+      await this.assertMfaUserActive(c, userUuid, "WebAuthn factor does not belong to user");
       await c.query(
         `UPDATE mfa SET webauthn_sign_count = $2 WHERE id = $1`,
         [r.id, result.newSignCount],
@@ -1616,7 +1643,7 @@ export class PostgresIdentityStore implements IdentityStore {
       if (matchedSlot === -1) {
         throw new InvalidCredentialError("Recovery code did not verify");
       }
-      await this.assertMfaUserActive(c, r.usr_id);
+      await this.assertMfaUserActive(c, r.usr_id, "Recovery code did not verify");
       consumed[matchedSlot] = true;
       await c.query(
         `UPDATE mfa SET recovery_consumed = $2 WHERE id = $1`,
@@ -1673,15 +1700,20 @@ export class PostgresIdentityStore implements IdentityStore {
   // ─── helpers ───
 
   // ADR 0029: a non-active user's valid proof is refused with the same error
-  // as a failed proof (no status oracle), inside the proof's transaction and
-  // before anything is consumed. FOR SHARE holds off a concurrent status change.
-  private async assertMfaUserActive(c: PoolClient, usrUuid: string): Promise<void> {
+  // and message as that proof type's failure (no status oracle), inside the
+  // proof's transaction and before anything is consumed. FOR SHARE holds off
+  // a concurrent status change.
+  private async assertMfaUserActive(
+    c: PoolClient,
+    usrUuid: string,
+    failureMessage: string,
+  ): Promise<void> {
     const { rows } = await c.query<{ status: string }>(
       `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
       [usrUuid],
     );
     if (rows[0]?.status !== "active") {
-      throw new InvalidCredentialError("MFA proof did not verify");
+      throw new InvalidCredentialError(failureMessage);
     }
   }
 

@@ -17,6 +17,7 @@ import {
   InMemoryIdentityStore,
   InvalidCredentialError,
   InvalidPatTokenError,
+  InvalidTokenError,
   PatRevokedError,
   PreconditionError,
   ReplayedTotpError,
@@ -129,6 +130,44 @@ function suite(name: string, makeStore: MakeStore): void {
       });
       return { store, user };
     }
+
+    async function sessionUser() {
+      const store = await makeStore(() => new Date());
+      const user = await store.createUser({});
+      const cred = await store.createCredential({
+        type: "password",
+        usrId: user.id,
+        identifier: "s@example.com",
+        password: PASSWORD,
+      });
+      const { session, token } = await store.createSession({
+        usrId: user.id,
+        credId: cred.id,
+        ttlSeconds: 3600,
+      });
+      return { store, user, session, token };
+    }
+
+    it("after suspendUser, refreshSession is refused with precondition.user_not_active", async () => {
+      const { store, user, session } = await sessionUser();
+      await store.suspendUser(user.id);
+      const err = await store.refreshSession(session.id).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PreconditionError);
+      expect((err as PreconditionError).code).toBe("precondition.user_not_active");
+    });
+
+    it("after suspendUser, verifySessionToken is refused with InvalidTokenError", async () => {
+      const { store, user, token } = await sessionUser();
+      await store.suspendUser(user.id);
+      await expect(store.verifySessionToken(token)).rejects.toBeInstanceOf(InvalidTokenError);
+    });
+
+    it("an active user's session still verifies and refreshes", async () => {
+      const { store, session, token } = await sessionUser();
+      expect((await store.verifySessionToken(token)).id).toBe(session.id);
+      const fresh = await store.refreshSession(session.id);
+      expect((await store.verifySessionToken(fresh.token)).id).toBe(fresh.session.id);
+    });
 
     it("a suspended user gets the same InvalidCredentialError for right and wrong passwords", async () => {
       const { store, user } = await passwordUser();

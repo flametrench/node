@@ -708,6 +708,11 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (!timingSafeStringEqual(tokenHash, entry.tokenHash)) {
       throw new InvalidTokenError(`Invalid token`);
     }
+    // ADR 0029: a non-active owner's session is refused, conflated with any
+    // other invalid token.
+    if (this.users.get(entry.session.usrId)?.status !== "active") {
+      throw new InvalidTokenError(`Invalid token`);
+    }
     if (entry.session.revokedAt !== null) {
       throw new SessionExpiredError(`Session is revoked`);
     }
@@ -719,6 +724,14 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   async refreshSession(sesId: SesId): Promise<CreateSessionResult> {
     const entry = this.requireSession(sesId);
+    // ADR 0029: refreshing issues a new session, so a non-active user is
+    // refused before the session's own state is considered.
+    if (this.users.get(entry.session.usrId)?.status !== "active") {
+      throw new PreconditionError(
+        `User ${entry.session.usrId} is not active; cannot refresh session`,
+        "user_not_active",
+      );
+    }
     if (entry.session.revokedAt !== null) {
       throw new SessionExpiredError(`Session is already revoked`);
     }
@@ -1044,7 +1057,7 @@ export class InMemoryIdentityStore implements IdentityStore {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
     if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
-    this.assertMfaUserActive(usrId);
+    this.assertMfaUserActive(usrId, "TOTP code did not verify");
     this.acceptTotpStep(mfaId, step);
     return {
       mfaId,
@@ -1085,7 +1098,7 @@ export class InMemoryIdentityStore implements IdentityStore {
       clientDataJson: proof.clientDataJson,
       signature: proof.signature,
     });
-    this.assertMfaUserActive(usrId);
+    this.assertMfaUserActive(usrId, "WebAuthn factor does not belong to user");
     const now = this.now();
     const updated: WebAuthnFactor = {
       ...factor,
@@ -1127,7 +1140,7 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (matchedSlot === -1) {
       throw new InvalidCredentialError("Recovery code did not verify");
     }
-    this.assertMfaUserActive(usrId);
+    this.assertMfaUserActive(usrId, "Recovery code did not verify");
     consumed[matchedSlot] = true;
     const factor = this.mfaFactors.get(mfaId);
     if (factor && factor.type === "recovery") {
@@ -1147,10 +1160,11 @@ export class InMemoryIdentityStore implements IdentityStore {
   }
 
   // ADR 0029: a non-active user's valid proof is refused with the same error
-  // as a failed proof (no status oracle), before anything is consumed.
-  private assertMfaUserActive(usrId: UsrId): void {
+  // and message as that proof type's failure (no status oracle), before
+  // anything is consumed.
+  private assertMfaUserActive(usrId: UsrId, failureMessage: string): void {
     if (this.users.get(usrId)?.status !== "active") {
-      throw new InvalidCredentialError("MFA proof did not verify");
+      throw new InvalidCredentialError(failureMessage);
     }
   }
 
