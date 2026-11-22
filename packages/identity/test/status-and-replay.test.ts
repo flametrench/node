@@ -84,6 +84,9 @@ function suite(name: string, makeStore: MakeStore): void {
       await expect(
         store.verifyMfa(user.id, { type: "totp", code }),
       ).rejects.toBeInstanceOf(ReplayedTotpError);
+      const replay = await store.verifyMfa(user.id, { type: "totp", code }).catch((e: unknown) => e);
+      expect(replay).toBeInstanceOf(InvalidCredentialError);
+      expect((replay as ReplayedTotpError).code).toBe("unauthorized.totp_replayed");
       const next = at("2026-01-01T00:01:30Z");
       const ok = await store.verifyMfa(user.id, { type: "totp", code: next });
       expect(ok.type).toBe("totp");

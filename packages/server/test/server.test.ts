@@ -5,10 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 
 import { InMemoryTupleStore } from "@flametrench/authz";
-import { InMemoryIdentityStore } from "@flametrench/identity";
+import { InMemoryIdentityStore, ReplayedTotpError } from "@flametrench/identity";
 import { InMemoryTenancyStore } from "@flametrench/tenancy";
 
-import { createFlametrenchServer } from "../src/index.js";
+import { createFlametrenchServer, mapErrorToResponse } from "../src/index.js";
 
 describe("@flametrench/server (integration via inject)", () => {
   let app: FastifyInstance;
@@ -490,5 +490,11 @@ describe("@flametrench/server (integration via inject)", () => {
       expect(res.statusCode).toBe(400);
       expect(res.json().code).toBe("invalid_format.relation");
     });
+  });
+
+  it("a replayed TOTP code maps to 401 like a wrong code", () => {
+    const { status, envelope } = mapErrorToResponse(new ReplayedTotpError());
+    expect(status).toBe(401);
+    expect(envelope.code).toBe("unauthorized.totp_replayed");
   });
 });
