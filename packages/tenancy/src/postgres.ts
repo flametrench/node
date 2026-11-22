@@ -1281,6 +1281,27 @@ export class PostgresTenancyStore implements TenancyStore {
     });
   }
 
+  async revokeInvitationAsSystem(invId: InvId): Promise<Invitation> {
+    return this.tx(async (c) => {
+      const res = await c.query<{ id: string; status: string }>(
+        `SELECT id, status FROM inv WHERE id = $1 FOR UPDATE`,
+        [wireToUuid(invId)],
+      );
+      if (res.rows.length === 0) throw new NotFoundError(`Invitation ${invId} not found`);
+      if (res.rows[0]!.status !== "pending") {
+        throw new InvitationNotPendingError(
+          `Invitation ${invId} is ${res.rows[0]!.status}`,
+        );
+      }
+      const { rows } = await c.query<InvRow>(
+        `UPDATE inv SET status = 'revoked', terminal_at = $1, terminal_by = NULL WHERE id = $2
+         RETURNING id, org_id, identifier, role, status, pre_tuples, invited_by, invited_user_id, created_at, expires_at, terminal_at, terminal_by`,
+        [this.now(), res.rows[0]!.id],
+      );
+      return rowToInv(rows[0]!);
+    });
+  }
+
   // ─── Tuple accessors ───
 
   async listTuplesForSubject(

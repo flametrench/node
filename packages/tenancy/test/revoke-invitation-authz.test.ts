@@ -1,8 +1,8 @@
 // Copyright 2026 NDC Digital, LLC
 // SPDX-License-Identifier: Apache-2.0
 //
-// revokeInvitation authorization: a refused call leaves the invitation
-// untouched. Runs against InMemoryTenancyStore and, when TENANCY_POSTGRES_URL
+// revokeInvitation authorization, and revokeInvitationAsSystem: a refused
+// call leaves the invitation untouched. Runs against InMemoryTenancyStore and, when TENANCY_POSTGRES_URL
 // is set, PostgresTenancyStore.
 
 import { readFileSync } from "node:fs";
@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ForbiddenError,
   InMemoryTenancyStore,
+  InvitationNotPendingError,
   type TenancyStore,
   type UsrId,
 } from "../src/index.js";
@@ -89,6 +90,15 @@ function suite(name: string, makeEnv: () => Promise<Env>): void {
       await expect(
         store.revokeInvitation({ invId: inv.id, adminUsrId: other }),
       ).rejects.toBeInstanceOf(ForbiddenError);
+    });
+
+    it("revokeInvitationAsSystem refuses a non-pending invitation and leaves it unchanged", async () => {
+      const { store, owner, inv } = await setup();
+      const revoked = await store.revokeInvitation({ invId: inv.id, adminUsrId: owner });
+      await expect(store.revokeInvitationAsSystem(inv.id)).rejects.toBeInstanceOf(
+        InvitationNotPendingError,
+      );
+      expect(await store.getInvitation(inv.id)).toEqual(revoked);
     });
   });
 }
