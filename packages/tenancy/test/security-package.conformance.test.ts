@@ -1,7 +1,8 @@
 // Copyright 2026 NDC Digital, LLC
 // SPDX-License-Identifier: Apache-2.0
 //
-// State-machine harness for tenancy/revoke-invitation-authz.json, run against
+// State-machine harness for tenancy/revoke-invitation-authz.json and
+// tenancy/revoke-invitation-as-system.json, run against
 // BOTH InMemoryTenancyStore and PostgresTenancyStore (the latter only when
 // TENANCY_POSTGRES_URL is set). Declared `users` get fresh usr_ ids; on
 // Postgres they are also inserted into `usr` so membership FKs resolve.
@@ -42,9 +43,14 @@ interface FixtureTest {
   steps: Step[];
 }
 
-const fixture = JSON.parse(
-  readFileSync(join(FIXTURES_DIR, "tenancy/revoke-invitation-authz.json"), "utf8"),
-) as { tests: FixtureTest[] };
+const FIXTURES = [
+  ["tenancy.revoke_invitation", "tenancy/revoke-invitation-authz.json"],
+  ["tenancy.revoke_invitation_as_system", "tenancy/revoke-invitation-as-system.json"],
+] as const;
+
+function loadFixture(file: string): { tests: FixtureTest[] } {
+  return JSON.parse(readFileSync(join(FIXTURES_DIR, file), "utf8")) as { tests: FixtureTest[] };
+}
 
 function resolveVars(value: unknown, vars: Record<string, unknown>): unknown {
   if (typeof value === "string") {
@@ -93,6 +99,8 @@ async function invoke(s: TenancyStore, op: string, a: Record<string, unknown>): 
       });
     case "revoke_invitation":
       return s.revokeInvitation({ invId: a.inv_id as `inv_${string}`, adminUsrId: a.admin_usr_id as UsrId });
+    case "revoke_invitation_as_system":
+      return s.revokeInvitationAsSystem(a.inv_id as `inv_${string}`);
     case "assert_invitation_status": {
       const inv = await s.getInvitation(a.inv_id as `inv_${string}`);
       expect(inv.status, "invitation status").toBe(a.expected_status);
@@ -141,29 +149,33 @@ async function runTest(
   }
 }
 
-describe("[in-memory] tenancy.revoke_invitation (tenancy/revoke-invitation-authz.json)", () => {
-  for (const t of fixture.tests) {
-    it(`[${t.id}] ${t.description}`, async () => {
-      await runTest(new InMemoryTenancyStore(), t, async () => {});
-    });
-  }
-});
+for (const [name, file] of FIXTURES) {
+  const fixture = loadFixture(file);
 
-describe.skipIf(!POSTGRES_URL)("[postgres] tenancy.revoke_invitation (tenancy/revoke-invitation-authz.json)", () => {
-  let pool: Pool;
-  beforeAll(() => {
-    pool = new Pool({ connectionString: POSTGRES_URL });
-  });
-  afterAll(async () => {
-    await pool.end();
-  });
-  for (const t of fixture.tests) {
-    it(`[${t.id}] ${t.description}`, async () => {
-      await pool.query(`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`);
-      await pool.query(SCHEMA_SQL);
-      await runTest(new PostgresTenancyStore(pool), t, async (u) => {
-        await pool.query(`INSERT INTO usr (id, status) VALUES ($1, 'active')`, [decode(u).uuid]);
+  describe(`[in-memory] ${name} (${file})`, () => {
+    for (const t of fixture.tests) {
+      it(`[${t.id}] ${t.description}`, async () => {
+        await runTest(new InMemoryTenancyStore(), t, async () => {});
       });
+    }
+  });
+
+  describe.skipIf(!POSTGRES_URL)(`[postgres] ${name} (${file})`, () => {
+    let pool: Pool;
+    beforeAll(() => {
+      pool = new Pool({ connectionString: POSTGRES_URL });
     });
-  }
-});
+    afterAll(async () => {
+      await pool.end();
+    });
+    for (const t of fixture.tests) {
+      it(`[${t.id}] ${t.description}`, async () => {
+        await pool.query(`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`);
+        await pool.query(SCHEMA_SQL);
+        await runTest(new PostgresTenancyStore(pool), t, async (u) => {
+          await pool.query(`INSERT INTO usr (id, status) VALUES ($1, 'active')`, [decode(u).uuid]);
+        });
+      });
+    }
+  });
+}

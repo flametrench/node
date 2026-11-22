@@ -113,6 +113,23 @@ export interface TenancyStore {
   acceptInvitation(input: AcceptInvitationInput): Promise<AcceptInvitationResult>;
   declineInvitation(input: DeclineInvitationInput): Promise<Invitation>;
   revokeInvitation(input: RevokeInvitationInput): Promise<Invitation>;
+  /**
+   * Revoke a pending invitation as the system: no actor and no authorization
+   * check. The invitation becomes `revoked` with `terminalBy` null
+   * (ADR 0028).
+   *
+   * Call-site gate (ADR 0028 rule 7): call this ONLY from server-side system
+   * or automation code, such as clean-up jobs or cascades from your own
+   * workflows. It MUST NOT be reachable from any user-facing or
+   * tenant-scoped route. The SDK cannot enforce this and conformance cannot
+   * detect a missing gate; the route layer is the only control. This is the
+   * same pattern as `listOrgs`. For a revoke performed by a person, use
+   * {@link revokeInvitation}.
+   *
+   * @throws NotFoundError if the invitation does not exist.
+   * @throws InvitationNotPendingError if the invitation is not pending.
+   */
+  revokeInvitationAsSystem(invId: InvId): Promise<Invitation>;
 
   // ─── Authorization tuple accessors (read-only) ───
 

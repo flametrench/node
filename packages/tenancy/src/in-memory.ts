@@ -782,6 +782,23 @@ export class InMemoryTenancyStore implements TenancyStore {
     return updated;
   }
 
+  async revokeInvitationAsSystem(invId: InvId): Promise<Invitation> {
+    const inv = await this.getInvitation(invId);
+    if (inv.status !== "pending") {
+      throw new InvitationNotPendingError(
+        `Invitation ${invId} is ${inv.status}, not pending`,
+      );
+    }
+    const updated: Invitation = {
+      ...inv,
+      status: "revoked",
+      terminalAt: this.now(),
+      terminalBy: null,
+    };
+    this.invitations.set(inv.id, updated);
+    return updated;
+  }
+
   // ─── Tuple accessors ───
 
   async listTuplesForSubject(
