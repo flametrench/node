@@ -18,6 +18,7 @@ import {
   InvalidTokenError,
   NotFoundError,
   PreconditionError,
+  ReplayedTotpError,
   SessionExpiredError,
   generateRecoveryCode,
   totpCompute,
@@ -473,12 +474,20 @@ describe.skipIf(!hasPostgres)("PostgresIdentityStore", () => {
     // Compute a valid code from the otpauth URI's secret.
     const secretB32 = enroll.secretB32;
     const secretBytes = base32Decode(secretB32);
-    const code = totpCompute(secretBytes, Math.floor(Date.now() / 1000));
+    const t0 = Math.floor(Date.now() / 1000);
+    const code = totpCompute(secretBytes, t0);
 
     const active = await store.confirmTotpFactor(enroll.factor.id, code);
     expect(active.status).toBe("active");
 
-    const result = await store.verifyMfa(user.id, { type: "totp", code });
+    // The confirming code's step is consumed; the next step's code verifies.
+    await expect(
+      store.verifyMfa(user.id, { type: "totp", code }),
+    ).rejects.toBeInstanceOf(ReplayedTotpError);
+    const result = await store.verifyMfa(user.id, {
+      type: "totp",
+      code: totpCompute(secretBytes, t0 + 30),
+    });
     expect(result.type).toBe("totp");
     expect(result.mfaId).toBe(active.id);
   });

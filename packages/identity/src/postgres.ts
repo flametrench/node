@@ -47,6 +47,7 @@ import {
   PatExpiredError,
   PatRevokedError,
   PreconditionError,
+  ReplayedTotpError,
   SessionExpiredError,
 } from "./errors.js";
 import {
@@ -65,7 +66,7 @@ import {
   isValidRecoveryCode,
   normalizeRecoveryInput,
   totpOtpauthUri,
-  totpVerify,
+  totpMatchStep,
   type Factor,
   type MfaProof,
   type MfaVerifyResult,
@@ -664,7 +665,8 @@ export class PostgresIdentityStore implements IdentityStore {
         throw new AlreadyTerminalError(`User ${usrId} is already revoked`);
       }
       const now = this.now();
-      // Cascade: revoke active credentials, terminate active sessions.
+      // Cascade: revoke active credentials, terminate active sessions,
+      // revoke live PATs (ADR 0016: PATs auto-revoke with their owner).
       await c.query(
         `UPDATE cred SET status = 'revoked'
          WHERE usr_id = $1 AND status = 'active'`,
@@ -672,6 +674,11 @@ export class PostgresIdentityStore implements IdentityStore {
       );
       await c.query(
         `UPDATE ses SET revoked_at = $2
+         WHERE usr_id = $1 AND revoked_at IS NULL`,
+        [uuid, now],
+      );
+      await c.query(
+        `UPDATE pat SET revoked_at = GREATEST($2::timestamptz, created_at)
          WHERE usr_id = $1 AND revoked_at IS NULL`,
         [uuid, now],
       );
@@ -965,8 +972,13 @@ export class PostgresIdentityStore implements IdentityStore {
   }
 
   async verifyPassword(input: VerifyPasswordInput): Promise<VerifiedCredentialResult> {
-    const { rows } = await this.pool.query<CredRow>(
-      `SELECT ${CRED_COLS} FROM cred
+    // The owner's status is fetched in the same round-trip and checked only
+    // after the hash verifies, so a suspended user is indistinguishable from
+    // a wrong password by timing or error.
+    const { rows } = await this.pool.query<CredRow & { usr_status: string }>(
+      `SELECT ${CRED_COLS},
+              (SELECT status FROM usr WHERE usr.id = cred.usr_id) AS usr_status
+       FROM cred
        WHERE type = 'password' AND identifier = $1 AND status = 'active'`,
       [input.identifier],
     );
@@ -978,7 +990,7 @@ export class PostgresIdentityStore implements IdentityStore {
     }
     const cred = rows[0]!;
     const ok = await argon2.verify(cred.password_hash!, input.password);
-    if (!ok) {
+    if (!ok || cred.usr_status !== "active") {
       throw new InvalidCredentialError(`Invalid credential`);
     }
     // ADR 0008: surface usr_mfa_policy state. Apps MUST gate
@@ -1010,8 +1022,10 @@ export class PostgresIdentityStore implements IdentityStore {
       throw new PreconditionError(`ttlSeconds must be >= 60`, "ttl_too_short");
     }
     return this.tx(async (c) => {
+      // FOR SHARE so a concurrent revokeUser can't commit its session
+      // cascade between this check and the insert (same as createPat).
       const userRes = await c.query<UsrRow>(
-        `SELECT status FROM usr WHERE id = $1`,
+        `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
         [userUuid],
       );
       if (userRes.rows.length === 0) {
@@ -1106,6 +1120,15 @@ export class PostgresIdentityStore implements IdentityStore {
     if (r.token_hash === null || !timingSafeBufferEqual(tokenHash, r.token_hash)) {
       throw new InvalidTokenError(`Invalid token`);
     }
+    // ADR 0029: a non-active owner's session is refused, conflated with any
+    // other invalid token.
+    const owner = await this.pool.query<{ status: string }>(
+      `SELECT status FROM usr WHERE id = $1`,
+      [r.usr_id],
+    );
+    if (owner.rows[0]?.status !== "active") {
+      throw new InvalidTokenError(`Invalid token`);
+    }
     if (r.revoked_at !== null) {
       throw new SessionExpiredError(`Session is revoked`);
     }
@@ -1118,13 +1141,31 @@ export class PostgresIdentityStore implements IdentityStore {
   async refreshSession(sesId: SesId): Promise<CreateSessionResult> {
     return this.tx(async (c) => {
       const uuid = wireToUuid(sesId);
+      // ADR 0029: lock usr FOR SHARE before ses FOR UPDATE, the same usr->ses
+      // order as suspendUser/revokeUser. A concurrent suspension then either
+      // commits first (this refresh is refused) or waits and its session
+      // cascade sees the new session.
+      const head = await c.query<{ usr_id: string }>(
+        `SELECT usr_id FROM ses WHERE id = $1`,
+        [uuid],
+      );
+      if (head.rows.length === 0) {
+        throw new NotFoundError(`Session ${sesId} not found`);
+      }
+      const owner = await c.query<{ status: string }>(
+        `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
+        [head.rows[0]!.usr_id],
+      );
+      if (owner.rows[0]?.status !== "active") {
+        throw new PreconditionError(
+          `User is not active; cannot refresh session ${sesId}`,
+          "user_not_active",
+        );
+      }
       const cur = await c.query<SesRow>(
         `SELECT ${SES_COLS} FROM ses WHERE id = $1 FOR UPDATE`,
         [uuid],
       );
-      if (cur.rows.length === 0) {
-        throw new NotFoundError(`Session ${sesId} not found`);
-      }
       const old = cur.rows[0]!;
       if (old.revoked_at !== null) {
         throw new SessionExpiredError(`Session is already revoked`);
@@ -1307,15 +1348,38 @@ export class PostgresIdentityStore implements IdentityStore {
     const consumed = codes.map(() => false);
     const id = decode(generate("mfa")).uuid;
     try {
-      const { rows } = await this.pool.query<MfaRow>(
-        `INSERT INTO mfa (id, usr_id, type, status,
-                          recovery_hashes, recovery_consumed,
-                          created_at, updated_at)
-         VALUES ($1, $2, 'recovery', 'active', $3, $4, $5, $5)
-         RETURNING ${MFA_COLS}`,
-        [id, userUuid, hashes, consumed, now],
-      );
-      return { factor: rowToFactor(rows[0]!) as RecoveryFactor, codes };
+      return await this.tx(async (c) => {
+        // ADR 0008: once every code of the active set is consumed,
+        // re-enrolling revokes that set and the new one replaces it. An
+        // unexhausted active set is still refused below.
+        const cur = await c.query<MfaRow>(
+          `SELECT ${MFA_COLS} FROM mfa
+           WHERE usr_id = $1 AND type = 'recovery' AND status = 'active'
+           FOR UPDATE`,
+          [userUuid],
+        );
+        let replaces: string | null = null;
+        if (cur.rows.length > 0) {
+          const old = cur.rows[0]!;
+          if (!old.recovery_consumed!.every(Boolean)) {
+            throw new PreconditionError(
+              `User ${usrId} already has an active recovery factor; revoke before re-enrolling`,
+              "active_singleton_exists",
+            );
+          }
+          await c.query(`UPDATE mfa SET status = 'revoked' WHERE id = $1`, [old.id]);
+          replaces = old.id;
+        }
+        const { rows } = await c.query<MfaRow>(
+          `INSERT INTO mfa (id, usr_id, type, status, replaces,
+                            recovery_hashes, recovery_consumed,
+                            created_at, updated_at)
+           VALUES ($1, $2, 'recovery', 'active', $3, $4, $5, $6, $6)
+           RETURNING ${MFA_COLS}`,
+          [id, userUuid, replaces, hashes, consumed, now],
+        );
+        return { factor: rowToFactor(rows[0]!) as RecoveryFactor, codes };
+      });
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new PreconditionError(
@@ -1369,17 +1433,23 @@ export class PostgresIdentityStore implements IdentityStore {
         );
       }
       this.checkPendingNotExpired(r);
-      const ok = totpVerify(r.totp_secret!, code, {
+      const step = totpMatchStep(r.totp_secret!, code, {
         timestamp: Math.floor(this.now().getTime() / 1000),
       });
-      if (!ok) {
+      if (step === null) {
         throw new InvalidCredentialError("TOTP code did not verify");
       }
+      // The confirming code's step seeds the same replay state verifyMfa
+      // advances, so it cannot be replayed as the first verify.
       const { rows } = await c.query<MfaRow>(
-        `UPDATE mfa SET status = 'active', pending_expires_at = NULL WHERE id = $1
+        `UPDATE mfa SET status = 'active', pending_expires_at = NULL,
+                        totp_last_accepted_step = $2
+         WHERE id = $1
+           AND (totp_last_accepted_step IS NULL OR totp_last_accepted_step < $2)
          RETURNING ${MFA_COLS}`,
-        [uuid],
+        [uuid, step],
       );
+      if (rows.length === 0) throw new ReplayedTotpError();
       return rowToFactor(rows[0]!) as TotpFactor;
     });
   }
@@ -1471,16 +1541,29 @@ export class PostgresIdentityStore implements IdentityStore {
       throw new InvalidCredentialError("No active TOTP factor for user");
     }
     const r = rows[0]!;
-    const ok = totpVerify(r.totp_secret!, code, {
+    const step = totpMatchStep(r.totp_secret!, code, {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
-    if (!ok) throw new InvalidCredentialError("TOTP code did not verify");
-    return {
-      mfaId: encode("mfa", r.id) as `mfa_${string}`,
-      type: "totp",
-      mfaVerifiedAt: this.now(),
-      newSignCount: null,
-    };
+    if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
+    return this.tx(async (c) => {
+      await this.assertMfaUserActive(c, r.usr_id, "TOTP code did not verify");
+      // ADR 0027 replay protection: reject any step <= the last accepted
+      // step. Check-and-advance is one conditional UPDATE, so two concurrent
+      // verifies of the same code cannot both succeed.
+      const advanced = await c.query(
+        `UPDATE mfa SET totp_last_accepted_step = $2
+         WHERE id = $1 AND status = 'active'
+           AND (totp_last_accepted_step IS NULL OR totp_last_accepted_step < $2)`,
+        [r.id, step],
+      );
+      if (advanced.rowCount === 0) throw new ReplayedTotpError();
+      return {
+        mfaId: encode("mfa", r.id) as `mfa_${string}`,
+        type: "totp",
+        mfaVerifiedAt: this.now(),
+        newSignCount: null,
+      };
+    });
   }
 
   private async verifyWebAuthnProof(
@@ -1513,6 +1596,7 @@ export class PostgresIdentityStore implements IdentityStore {
         clientDataJson: proof.clientDataJson,
         signature: proof.signature,
       });
+      await this.assertMfaUserActive(c, userUuid, "WebAuthn factor does not belong to user");
       await c.query(
         `UPDATE mfa SET webauthn_sign_count = $2 WHERE id = $1`,
         [r.id, result.newSignCount],
@@ -1559,6 +1643,7 @@ export class PostgresIdentityStore implements IdentityStore {
       if (matchedSlot === -1) {
         throw new InvalidCredentialError("Recovery code did not verify");
       }
+      await this.assertMfaUserActive(c, r.usr_id, "Recovery code did not verify");
       consumed[matchedSlot] = true;
       await c.query(
         `UPDATE mfa SET recovery_consumed = $2 WHERE id = $1`,
@@ -1614,6 +1699,24 @@ export class PostgresIdentityStore implements IdentityStore {
 
   // ─── helpers ───
 
+  // ADR 0029: a non-active user's valid proof is refused with the same error
+  // and message as that proof type's failure (no status oracle), inside the
+  // proof's transaction and before anything is consumed. FOR SHARE holds off
+  // a concurrent status change.
+  private async assertMfaUserActive(
+    c: PoolClient,
+    usrUuid: string,
+    failureMessage: string,
+  ): Promise<void> {
+    const { rows } = await c.query<{ status: string }>(
+      `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
+      [usrUuid],
+    );
+    if (rows[0]?.status !== "active") {
+      throw new InvalidCredentialError(failureMessage);
+    }
+  }
+
   private checkPendingNotExpired(r: MfaRow): void {
     if (r.status !== "pending") return;
     if (r.pending_expires_at !== null
@@ -1655,13 +1758,30 @@ export class PostgresIdentityStore implements IdentityStore {
     });
     const token = `${patId}_${secret}`;
     const scope = input.scope ?? [];
-    const { rows } = await this.pool.query<PatRow>(
-      `INSERT INTO pat (id, usr_id, name, scope, secret_hash, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at`,
-      [patUuid, usrUuid, input.name, scope, hash, input.expiresAt ?? null],
-    );
-    const pat = rowToPat(rows[0]!, input.usrId, now);
+    // ADR 0016 / 0029: usr_id MUST be active. FOR SHARE serialises against
+    // revokeUser's FOR UPDATE: either the revoke waits and then cascades to
+    // this PAT, or it commits first and this insert is refused.
+    const pat = await this.tx(async (c) => {
+      const owner = await c.query<{ status: string }>(
+        `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
+        [usrUuid],
+      );
+      if (owner.rows.length === 0) throw new NotFoundError(`User ${input.usrId} not found`);
+      const ownerStatus = owner.rows[0]!.status;
+      if (ownerStatus !== "active") {
+        throw new PreconditionError(
+          `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
+          "user_not_active",
+        );
+      }
+      const { rows } = await c.query<PatRow>(
+        `INSERT INTO pat (id, usr_id, name, scope, secret_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, usr_id, name, scope, expires_at, last_used_at, revoked_at, created_at, updated_at`,
+        [patUuid, usrUuid, input.name, scope, hash, input.expiresAt ?? null],
+      );
+      return rowToPat(rows[0]!, input.usrId, now);
+    });
     return { pat, token };
   }
 
@@ -1725,8 +1845,11 @@ export class PostgresIdentityStore implements IdentityStore {
       expires_at: Date | null;
       revoked_at: Date | null;
       scope: string[];
+      usr_status: string;
     }>(
-      `SELECT usr_id, secret_hash, expires_at, revoked_at, scope FROM pat WHERE id = $1`,
+      `SELECT usr_id, secret_hash, expires_at, revoked_at, scope,
+              (SELECT status FROM usr WHERE usr.id = pat.usr_id) AS usr_status
+       FROM pat WHERE id = $1`,
       [patUuid],
     );
     if (rows.length === 0) {
@@ -1738,7 +1861,9 @@ export class PostgresIdentityStore implements IdentityStore {
     const now = this.now();
     if (r.expires_at !== null && now >= r.expires_at) throw new PatExpiredError(patId);
     const ok = await argon2.verify(r.secret_hash, secret);
-    if (!ok) throw new InvalidPatTokenError();
+    // A non-active owner cannot authenticate. Checked after the hash and
+    // reported as InvalidPatTokenError so owner status is not disclosed.
+    if (!ok || r.usr_status !== "active") throw new InvalidPatTokenError();
     // Coalesced last_used_at — best-effort, discard errors.
     const threshold = new Date(now.getTime() - 60 * 1000);
     await this.pool

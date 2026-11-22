@@ -36,9 +36,21 @@ export class DuplicateCredentialError extends IdentityError {
 
 /** Password verification failed (wrong password, or no matching credential). */
 export class InvalidCredentialError extends IdentityError {
-  constructor(message: string) {
-    super(message, "unauthorized.invalid_credential");
+  constructor(message: string, code = "unauthorized.invalid_credential") {
+    super(message, code);
     this.name = "InvalidCredentialError";
+  }
+}
+
+/**
+ * A TOTP code verified cryptographically but its time-step is not newer than
+ * the factor's last accepted step (ADR 0027). A subtype of
+ * InvalidCredentialError so callers handle a replay like a wrong code.
+ */
+export class ReplayedTotpError extends InvalidCredentialError {
+  constructor(message = "TOTP code has already been used") {
+    super(message, "unauthorized.totp_replayed");
+    this.name = "ReplayedTotpError";
   }
 }
 

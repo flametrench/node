@@ -20,6 +20,7 @@ import {
   InMemoryIdentityStore,
   InvalidCredentialError,
   PreconditionError,
+  ReplayedTotpError,
   b64urlEncode,
   coseKeyEs256,
   isValidRecoveryCode,
@@ -170,13 +171,16 @@ describe("TOTP factor enrollment", () => {
     const user = await store.createUser();
     const enroll = await store.enrollTotpFactor(user.id, "iPhone");
     const secret = base32Decode(enroll.secretB32);
-    await store.confirmTotpFactor(
-      enroll.factor.id,
-      totpCompute(secret, Math.floor(clock().getTime() / 1000)),
-    );
+    const t0 = Math.floor(clock().getTime() / 1000);
+    const confirmCode = totpCompute(secret, t0);
+    await store.confirmTotpFactor(enroll.factor.id, confirmCode);
+    // The confirming code's step is consumed; the next step's code verifies.
+    await expect(
+      store.verifyMfa(user.id, { type: "totp", code: confirmCode }),
+    ).rejects.toBeInstanceOf(ReplayedTotpError);
     const result = await store.verifyMfa(user.id, {
       type: "totp",
-      code: totpCompute(secret, Math.floor(clock().getTime() / 1000)),
+      code: totpCompute(secret, t0 + 30),
     });
     expect(result.type).toBe("totp");
     expect(result.mfaId).toBe(enroll.factor.id);

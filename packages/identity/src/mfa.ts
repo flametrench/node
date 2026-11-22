@@ -243,6 +243,19 @@ export function totpVerify(
   candidate: string,
   options: TotpVerifyOptions = {},
 ): boolean {
+  return totpMatchStep(secret, candidate, options) !== null;
+}
+
+/**
+ * Like totpVerify, but returns the RFC 6238 time-step counter
+ * (floor(unix_time / period)) of the matching window, or null on no match.
+ * Replay protection compares this against the factor's last accepted step.
+ */
+export function totpMatchStep(
+  secret: Uint8Array,
+  candidate: string,
+  options: TotpVerifyOptions = {},
+): number | null {
   const period = options.period ?? DEFAULT_TOTP_PERIOD;
   const digits = options.digits ?? DEFAULT_TOTP_DIGITS;
   const algorithm = options.algorithm ?? DEFAULT_TOTP_ALGORITHM;
@@ -264,7 +277,7 @@ export function totpVerify(
     candidate.length !== digits ||
     !/^[0-9]+$/.test(candidate)
   ) {
-    return false;
+    return null;
   }
 
   for (let w = -driftWindows; w <= driftWindows; w++) {
@@ -276,10 +289,10 @@ export function totpVerify(
         Buffer.from(candidate, "ascii"),
       )
     ) {
-      return true;
+      return Math.floor(ts / period);
     }
   }
-  return false;
+  return null;
 }
 
 /** Generate a fresh TOTP shared secret. Default 20 bytes per RFC 6238. */

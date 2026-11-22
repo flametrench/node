@@ -18,6 +18,7 @@ import {
   PatExpiredError,
   PatRevokedError,
   PreconditionError,
+  ReplayedTotpError,
   SessionExpiredError,
 } from "./errors.js";
 import {
@@ -33,7 +34,7 @@ import {
   isValidRecoveryCode,
   normalizeRecoveryInput,
   totpOtpauthUri,
-  totpVerify,
+  totpMatchStep,
   type Factor,
   type MfaProof,
   type MfaVerifyResult,
@@ -612,7 +613,9 @@ export class InMemoryIdentityStore implements IdentityStore {
     }
     const stored = cred as StoredPasswordCredential;
     const ok = await argon2.verify(stored.passwordHash, input.password);
-    if (!ok) {
+    // Owner status is checked only after the hash, so a suspended user is
+    // indistinguishable from a wrong password by timing or error.
+    if (!ok || this.users.get(cred.usrId)?.status !== "active") {
       throw new InvalidCredentialError(`Invalid credential`);
     }
     // ADR 0008: surface usr_mfa_policy state.
@@ -705,6 +708,11 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (!timingSafeStringEqual(tokenHash, entry.tokenHash)) {
       throw new InvalidTokenError(`Invalid token`);
     }
+    // ADR 0029: a non-active owner's session is refused, conflated with any
+    // other invalid token.
+    if (this.users.get(entry.session.usrId)?.status !== "active") {
+      throw new InvalidTokenError(`Invalid token`);
+    }
     if (entry.session.revokedAt !== null) {
       throw new SessionExpiredError(`Session is revoked`);
     }
@@ -716,6 +724,14 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   async refreshSession(sesId: SesId): Promise<CreateSessionResult> {
     const entry = this.requireSession(sesId);
+    // ADR 0029: refreshing issues a new session, so a non-active user is
+    // refused before the session's own state is considered.
+    if (this.users.get(entry.session.usrId)?.status !== "active") {
+      throw new PreconditionError(
+        `User ${entry.session.usrId} is not active; cannot refresh session`,
+        "user_not_active",
+      );
+    }
     if (entry.session.revokedAt !== null) {
       throw new SessionExpiredError(`Session is already revoked`);
     }
@@ -765,6 +781,8 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   private mfaFactors = new Map<string, Factor>();
   private mfaTotpSecrets = new Map<string, Uint8Array>();
+  /** Per-factor last accepted TOTP time-step (mfa.totp_last_accepted_step). */
+  private mfaTotpLastStep = new Map<string, number>();
   private mfaWebauthnKeys = new Map<string, Uint8Array>();
   private mfaRecoveryHashes = new Map<string, string[]>();
   private mfaRecoveryConsumed = new Map<string, boolean[]>();
@@ -810,6 +828,17 @@ export class InMemoryIdentityStore implements IdentityStore {
         "pending_factor_expired",
       );
     }
+  }
+
+  /**
+   * ADR 0008 replay protection, design 3A: reject any step <= the factor's
+   * last accepted step, else record it. Synchronous, so check-and-advance
+   * cannot interleave with another verify.
+   */
+  private acceptTotpStep(mfaId: string, step: number): void {
+    const last = this.mfaTotpLastStep.get(mfaId);
+    if (last !== undefined && step <= last) throw new ReplayedTotpError();
+    this.mfaTotpLastStep.set(mfaId, step);
   }
 
   async enrollTotpFactor(
@@ -884,18 +913,30 @@ export class InMemoryIdentityStore implements IdentityStore {
 
   async enrollRecoveryFactor(usrId: UsrId): Promise<RecoveryEnrollmentResult> {
     this.checkUserActive(usrId);
-    this.enforceNoActiveSingleton(usrId, "recovery");
     const now = this.now();
     const codes = generateRecoveryCodes();
     const hashes = await Promise.all(codes.map((c) => hashPassword(c)));
     const consumed = codes.map(() => false);
+    // Decided after the hash await with no await until the insert, so a
+    // concurrent enrollment cannot leave two active sets. ADR 0008: once
+    // every code of the active set is consumed, re-enrolling revokes it and
+    // the new set replaces it; an unexhausted active set is still refused.
+    const oldId = this.mfaActiveSingleton.get(`${usrId}|recovery`);
+    if (oldId !== undefined) {
+      if (!this.mfaRecoveryConsumed.get(oldId)!.every(Boolean)) {
+        this.enforceNoActiveSingleton(usrId, "recovery");
+      }
+      const old = this.requireFactor(oldId);
+      this.mfaFactors.set(oldId, { ...old, status: "revoked", updatedAt: now });
+      this.mfaActiveSingleton.delete(`${usrId}|recovery`);
+    }
     const mfaId = generate("mfa") as `mfa_${string}`;
     const factor: RecoveryFactor = {
       type: "recovery",
       id: mfaId,
       usrId,
       status: "active",
-      replaces: null,
+      replaces: oldId ?? null,
       createdAt: now,
       updatedAt: now,
       remaining: codes.length,
@@ -932,12 +973,13 @@ export class InMemoryIdentityStore implements IdentityStore {
     }
     this.checkPendingNotExpired(factor);
     const secret = this.mfaTotpSecrets.get(mfaId)!;
-    const ok = totpVerify(secret, code, {
+    const step = totpMatchStep(secret, code, {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
-    if (!ok) {
+    if (step === null) {
       throw new InvalidCredentialError("TOTP code did not verify");
     }
+    this.acceptTotpStep(mfaId, step);
     const now = this.now();
     const active: TotpFactor = { ...factor, status: "active", updatedAt: now };
     this.mfaFactors.set(mfaId, active);
@@ -1011,10 +1053,12 @@ export class InMemoryIdentityStore implements IdentityStore {
     const mfaId = this.mfaActiveSingleton.get(`${usrId}|totp`);
     if (!mfaId) throw new InvalidCredentialError("No active TOTP factor for user");
     const secret = this.mfaTotpSecrets.get(mfaId)!;
-    const ok = totpVerify(secret, code, {
+    const step = totpMatchStep(secret, code, {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
-    if (!ok) throw new InvalidCredentialError("TOTP code did not verify");
+    if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
+    this.assertMfaUserActive(usrId, "TOTP code did not verify");
+    this.acceptTotpStep(mfaId, step);
     return {
       mfaId,
       type: "totp",
@@ -1054,6 +1098,7 @@ export class InMemoryIdentityStore implements IdentityStore {
       clientDataJson: proof.clientDataJson,
       signature: proof.signature,
     });
+    this.assertMfaUserActive(usrId, "WebAuthn factor does not belong to user");
     const now = this.now();
     const updated: WebAuthnFactor = {
       ...factor,
@@ -1095,6 +1140,7 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (matchedSlot === -1) {
       throw new InvalidCredentialError("Recovery code did not verify");
     }
+    this.assertMfaUserActive(usrId, "Recovery code did not verify");
     consumed[matchedSlot] = true;
     const factor = this.mfaFactors.get(mfaId);
     if (factor && factor.type === "recovery") {
@@ -1111,6 +1157,15 @@ export class InMemoryIdentityStore implements IdentityStore {
       mfaVerifiedAt: this.now(),
       newSignCount: null,
     };
+  }
+
+  // ADR 0029: a non-active user's valid proof is refused with the same error
+  // and message as that proof type's failure (no status oracle), before
+  // anything is consumed.
+  private assertMfaUserActive(usrId: UsrId, failureMessage: string): void {
+    if (this.users.get(usrId)?.status !== "active") {
+      throw new InvalidCredentialError(failureMessage);
+    }
   }
 
   async getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null> {
@@ -1163,6 +1218,16 @@ export class InMemoryIdentityStore implements IdentityStore {
       parallelism: ARGON2ID_FLOOR.parallelism,
     });
     const token = `${patId}_${secret}`;
+    // ADR 0016 / 0029: usr_id MUST be active. Checked after the hash await,
+    // with no await before the insert, so a revokeUser or suspendUser that
+    // ran meanwhile is seen here.
+    const ownerStatus = this.users.get(input.usrId)?.status;
+    if (ownerStatus !== "active") {
+      throw new PreconditionError(
+        `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
+        "user_not_active",
+      );
+    }
     const pat: PersonalAccessToken = {
       id: patId,
       usrId: input.usrId,
@@ -1255,7 +1320,9 @@ export class InMemoryIdentityStore implements IdentityStore {
     // Step 6: Argon2id verify.
     const hash = this.patSecretHashes.get(patId)!;
     const ok = await argon2.verify(hash, secret);
-    if (!ok) {
+    // A non-active owner cannot authenticate. Checked after the hash and
+    // reported as InvalidPatTokenError so owner status is not disclosed.
+    if (!ok || this.users.get(pat.usrId)?.status !== "active") {
       throw new InvalidPatTokenError();
     }
 
