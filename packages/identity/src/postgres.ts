@@ -1518,24 +1518,25 @@ export class PostgresIdentityStore implements IdentityStore {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
     if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
-    // ADR 0008 replay protection, design 3A: reject any step <= the last
-    // accepted step. Check-and-advance is one conditional UPDATE, so two
-    // concurrent verifies of the same code cannot both succeed.
-    const advanced = await this.nested(() =>
-      this.pool.query(
+    return this.tx(async (c) => {
+      await this.assertMfaUserActive(c, r.usr_id);
+      // ADR 0027 replay protection: reject any step <= the last accepted
+      // step. Check-and-advance is one conditional UPDATE, so two concurrent
+      // verifies of the same code cannot both succeed.
+      const advanced = await c.query(
         `UPDATE mfa SET totp_last_accepted_step = $2
          WHERE id = $1 AND status = 'active'
            AND (totp_last_accepted_step IS NULL OR totp_last_accepted_step < $2)`,
         [r.id, step],
-      ),
-    );
-    if (advanced.rowCount === 0) throw new ReplayedTotpError();
-    return {
-      mfaId: encode("mfa", r.id) as `mfa_${string}`,
-      type: "totp",
-      mfaVerifiedAt: this.now(),
-      newSignCount: null,
-    };
+      );
+      if (advanced.rowCount === 0) throw new ReplayedTotpError();
+      return {
+        mfaId: encode("mfa", r.id) as `mfa_${string}`,
+        type: "totp",
+        mfaVerifiedAt: this.now(),
+        newSignCount: null,
+      };
+    });
   }
 
   private async verifyWebAuthnProof(
@@ -1568,6 +1569,7 @@ export class PostgresIdentityStore implements IdentityStore {
         clientDataJson: proof.clientDataJson,
         signature: proof.signature,
       });
+      await this.assertMfaUserActive(c, userUuid);
       await c.query(
         `UPDATE mfa SET webauthn_sign_count = $2 WHERE id = $1`,
         [r.id, result.newSignCount],
@@ -1614,6 +1616,7 @@ export class PostgresIdentityStore implements IdentityStore {
       if (matchedSlot === -1) {
         throw new InvalidCredentialError("Recovery code did not verify");
       }
+      await this.assertMfaUserActive(c, r.usr_id);
       consumed[matchedSlot] = true;
       await c.query(
         `UPDATE mfa SET recovery_consumed = $2 WHERE id = $1`,
@@ -1669,6 +1672,19 @@ export class PostgresIdentityStore implements IdentityStore {
 
   // ─── helpers ───
 
+  // ADR 0029: a non-active user's valid proof is refused with the same error
+  // as a failed proof (no status oracle), inside the proof's transaction and
+  // before anything is consumed. FOR SHARE holds off a concurrent status change.
+  private async assertMfaUserActive(c: PoolClient, usrUuid: string): Promise<void> {
+    const { rows } = await c.query<{ status: string }>(
+      `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
+      [usrUuid],
+    );
+    if (rows[0]?.status !== "active") {
+      throw new InvalidCredentialError("MFA proof did not verify");
+    }
+  }
+
   private checkPendingNotExpired(r: MfaRow): void {
     if (r.status !== "pending") return;
     if (r.pending_expires_at !== null
@@ -1710,7 +1726,7 @@ export class PostgresIdentityStore implements IdentityStore {
     });
     const token = `${patId}_${secret}`;
     const scope = input.scope ?? [];
-    // ADR 0016: usr_id MUST be non-revoked. FOR SHARE serialises against
+    // ADR 0016 / 0029: usr_id MUST be active. FOR SHARE serialises against
     // revokeUser's FOR UPDATE: either the revoke waits and then cascades to
     // this PAT, or it commits first and this insert is refused.
     const pat = await this.tx(async (c) => {
@@ -1719,10 +1735,11 @@ export class PostgresIdentityStore implements IdentityStore {
         [usrUuid],
       );
       if (owner.rows.length === 0) throw new NotFoundError(`User ${input.usrId} not found`);
-      if (owner.rows[0]!.status === "revoked") {
+      const ownerStatus = owner.rows[0]!.status;
+      if (ownerStatus !== "active") {
         throw new PreconditionError(
-          `User ${input.usrId} is revoked; cannot create PAT`,
-          "user_revoked",
+          `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
+          `user_${ownerStatus}`,
         );
       }
       const { rows } = await c.query<PatRow>(

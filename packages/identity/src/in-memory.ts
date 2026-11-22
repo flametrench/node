@@ -1044,6 +1044,7 @@ export class InMemoryIdentityStore implements IdentityStore {
       timestamp: Math.floor(this.now().getTime() / 1000),
     });
     if (step === null) throw new InvalidCredentialError("TOTP code did not verify");
+    this.assertMfaUserActive(usrId);
     this.acceptTotpStep(mfaId, step);
     return {
       mfaId,
@@ -1084,6 +1085,7 @@ export class InMemoryIdentityStore implements IdentityStore {
       clientDataJson: proof.clientDataJson,
       signature: proof.signature,
     });
+    this.assertMfaUserActive(usrId);
     const now = this.now();
     const updated: WebAuthnFactor = {
       ...factor,
@@ -1125,6 +1127,7 @@ export class InMemoryIdentityStore implements IdentityStore {
     if (matchedSlot === -1) {
       throw new InvalidCredentialError("Recovery code did not verify");
     }
+    this.assertMfaUserActive(usrId);
     consumed[matchedSlot] = true;
     const factor = this.mfaFactors.get(mfaId);
     if (factor && factor.type === "recovery") {
@@ -1141,6 +1144,14 @@ export class InMemoryIdentityStore implements IdentityStore {
       mfaVerifiedAt: this.now(),
       newSignCount: null,
     };
+  }
+
+  // ADR 0029: a non-active user's valid proof is refused with the same error
+  // as a failed proof (no status oracle), before anything is consumed.
+  private assertMfaUserActive(usrId: UsrId): void {
+    if (this.users.get(usrId)?.status !== "active") {
+      throw new InvalidCredentialError("MFA proof did not verify");
+    }
   }
 
   async getMfaPolicy(usrId: UsrId): Promise<UserMfaPolicy | null> {
@@ -1193,13 +1204,14 @@ export class InMemoryIdentityStore implements IdentityStore {
       parallelism: ARGON2ID_FLOOR.parallelism,
     });
     const token = `${patId}_${secret}`;
-    // ADR 0016: usr_id MUST be non-revoked. Checked after the hash await,
-    // with no await before the insert, so a revokeUser that ran meanwhile
-    // is seen here.
-    if (this.users.get(input.usrId)?.status === "revoked") {
+    // ADR 0016 / 0029: usr_id MUST be active. Checked after the hash await,
+    // with no await before the insert, so a revokeUser or suspendUser that
+    // ran meanwhile is seen here.
+    const ownerStatus = this.users.get(input.usrId)?.status;
+    if (ownerStatus !== "active") {
       throw new PreconditionError(
-        `User ${input.usrId} is revoked; cannot create PAT`,
-        "user_revoked",
+        `User ${input.usrId} is ${ownerStatus}; cannot create PAT`,
+        `user_${ownerStatus}`,
       );
     }
     const pat: PersonalAccessToken = {

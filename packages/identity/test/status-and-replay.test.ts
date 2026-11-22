@@ -186,12 +186,39 @@ function suite(name: string, makeStore: MakeStore): void {
       expect((await store.listPatsForUser(user.id)).data).toHaveLength(0);
     });
 
-    it("createPat for a suspended user is unchanged (out of scope, still allowed)", async () => {
+    it("createPat for a suspended user is refused (ADR 0029)", async () => {
       const store = await makeStore(() => new Date());
       const user = await store.createUser({});
       await store.suspendUser(user.id);
-      const { pat } = await store.createPat({ usrId: user.id, name: "ci", scope: [] });
-      expect(pat.revokedAt).toBeNull();
+      await expect(
+        store.createPat({ usrId: user.id, name: "ci", scope: [] }),
+      ).rejects.toBeInstanceOf(PreconditionError);
+      expect(await store.listPatsForUser(user.id)).toEqual({ data: [], nextCursor: null });
+    });
+
+    it("a suspended user's valid recovery code is refused and stays unconsumed", async () => {
+      const store = await makeStore(() => new Date());
+      const user = await store.createUser({});
+      const { codes } = await store.enrollRecoveryFactor(user.id);
+      await store.suspendUser(user.id);
+      await expect(
+        store.verifyMfa(user.id, { type: "recovery", code: codes[0]! }),
+      ).rejects.toBeInstanceOf(InvalidCredentialError);
+      await store.reinstateUser(user.id);
+      const ok = await store.verifyMfa(user.id, { type: "recovery", code: codes[0]! });
+      expect(ok.type).toBe("recovery");
+    });
+
+    it("a suspended user's valid TOTP code is refused and its step is not consumed", async () => {
+      const { store, user, at } = await totpUser();
+      const code = at("2026-01-01T00:01:00Z");
+      await store.suspendUser(user.id);
+      await expect(
+        store.verifyMfa(user.id, { type: "totp", code }),
+      ).rejects.toBeInstanceOf(InvalidCredentialError);
+      await store.reinstateUser(user.id);
+      const ok = await store.verifyMfa(user.id, { type: "totp", code });
+      expect(ok.type).toBe("totp");
     });
   });
 

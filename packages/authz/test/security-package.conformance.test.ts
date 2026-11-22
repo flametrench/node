@@ -68,6 +68,12 @@ describe.skipIf(!POSTGRES_URL)("[postgres] authorization.create_share (authoriza
             case "revoke_user":
               result = { user: await identity.revokeUser(a.usr_id as `usr_${string}`) };
               break;
+            case "suspend_user":
+              result = { user: await identity.suspendUser(a.usr_id as `usr_${string}`) };
+              break;
+            case "reinstate_user":
+              result = { user: await identity.reinstateUser(a.usr_id as `usr_${string}`) };
+              break;
             case "create_share":
               result = await shares.createShare({
                 objectType: a.object_type as string,
