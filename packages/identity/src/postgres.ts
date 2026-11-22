@@ -1022,8 +1022,10 @@ export class PostgresIdentityStore implements IdentityStore {
       throw new PreconditionError(`ttlSeconds must be >= 60`, "ttl_too_short");
     }
     return this.tx(async (c) => {
+      // FOR SHARE so a concurrent revokeUser can't commit its session
+      // cascade between this check and the insert (same as createPat).
       const userRes = await c.query<UsrRow>(
-        `SELECT status FROM usr WHERE id = $1`,
+        `SELECT status FROM usr WHERE id = $1 FOR SHARE`,
         [userUuid],
       );
       if (userRes.rows.length === 0) {
